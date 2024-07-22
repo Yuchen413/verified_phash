@@ -1,0 +1,52 @@
+# Example for using customized model and data loader.
+# Model and data loader defined in custom_model_data.py
+# python abcrown.py --config exp_configs/tutorial_examples/custom_cifar_data_example.yaml
+#Yuchen comment out   beta_crown_solver.py line 498  # assert stop_criterion_func.__qualname__.split('.')[0] == 'stop_criterion_all' ##comment out By YYC
+general:
+  conv_mode: patches
+  sparse_alpha: true
+  sparse_interm: true
+#  root_path: /home/yuchen/code/verified_phash/Verifier_Development/complete_verifier/vnncomp2022_benchmarks/benchmarks/cifar100_tinyimagenet_resnet
+#  csv_name: instances.csv
+model:
+  # Model is defined as simple_conv_model() in custom_model_data.py. The function simple_conv_model() will be called with arguments in_channel=3, out_dim=10.
+  name: Customized("custom_model_data", "resnet_v5") #resnet_v5
+  input_shape: [-1, 3, 64, 64]
+#  path: '/home/yuchen/code/verified_phash/Normal-Training/32-coco-hash-resnetv5-huber.pt'
+  path: '../../Fast-Certified-Robust-Training/64_ep1_resv5_l1/ckpt_best.pth'
+#  path: '../../Fast-Certified-Robust-Training/model_coco_resnetv5_64_fast_ci_huber/last_epoch_state_dict.pth'
+data:
+  # Use the cifar10() loader in "custom_model_data.py".
+  dataset: Customized("custom_model_data", "custom_coco_dataset")
+  mean: [0.485, 0.456, 0.406]
+  std: [0.229, 0.224, 0.225]
+  start: 0  # First example to verify in dataset.
+  end: 1  # Last example to verify in dataset. We verify 100 examples in this test.
+  num_outputs: 144
+specification:
+  epsilon: 0.0039  # 1./255.
+  vnnlib_path: coco_64.vnnlib
+attack:
+#  pgd_order: skip
+  pgd_order: middle
+  pgd_restarts: 10
+#  pgd_steps: 100  # Increase for a stronger attack. A PGD attack will be used before verification to filter on non-robust data examples.
+#  pgd_restarts: 30  # Increase for a stronger attack.
+solver:
+  batch_size: 64
+  beta-crown:
+    lr_alpha: 0.05
+    lr_beta: 0.1
+    iteration: 5
+  alpha-crown:
+    lr_alpha: 0.25
+    iteration: 20
+#  prune_after_crown: True
+  prune_after_crown: False
+bab:
+  initial_max_domains: 100
+  branching:
+    method: kfsb
+    candidates: 7
+    reduceop: max
+  interm_transfer: False

@@ -1,0 +1,54 @@
+name: gpu tests workflow
+
+on:
+  workflow_call:
+    inputs:
+      test-set:
+        required: true
+        type: string
+
+jobs:
+  GPU_Tests:
+    runs-on: self-hosted
+    if: ${{ inputs.test-set != 'examples' }}
+    env:
+      TEST_SET: ${{ inputs.test-set }}
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v3
+      - name: Link VNNCOMP benchmarks
+        run: |
+          cd $GITHUB_WORKSPACE/tests/gpu_tests
+          if [[ $TEST_SET == vnncomp21* ]]; then
+            rm vnncomp2021
+            ln -s ~/vnncomp2021 .
+            sleep 3
+          elif [[ $TEST_SET == vnncomp22* ]]; then
+            rm vnncomp2022_benchmarks
+            ln -s ~/vnncomp2022_benchmarks .
+            sleep 9
+          elif [[ $TEST_SET == vnncomp23* ]]; then
+            rm vnncomp2023_benchmarks
+            ln -s ~/vnncomp2023_benchmarks .
+            sleep 6
+          else
+            sleep 12
+          fi
+      - name: Run GPU tests
+        shell: bash -el {0}
+        run: |
+          source ~/miniconda3/etc/profile.d/conda.sh
+          conda init
+          conda activate alpha-beta-crown
+          cd $GITHUB_WORKSPACE/tests/gpu_tests
+          bash run_on_free_gpu.sh -s $TEST_SET
+      - name: Check GPU test results
+        shell: bash -el {0}
+        run: |
+          source ~/miniconda3/etc/profile.d/conda.sh
+          conda init
+          conda activate alpha-beta-crown
+          cd $GITHUB_WORKSPACE/tests/gpu_tests
+          python test.py -s $TEST_SET
+          result=$(python test.py -s $TEST_SET | awk '/Final result/,0' | tr '\n' ' ')
+          echo "::notice::${result}"

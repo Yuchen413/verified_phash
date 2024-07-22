@@ -1,0 +1,42 @@
+name: examples tests workflow
+
+on:
+  workflow_call:
+    inputs:
+      test-set:
+        required: true
+        type: string
+
+jobs:
+  Examples_Tests:
+    runs-on: self-hosted
+    if: ${{ inputs.test-set == 'examples' }}
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v3
+      - name: Install dependencies for examples
+        shell: bash -el {0}
+        run: |
+          source ~/miniconda3/etc/profile.d/conda.sh
+          conda init
+          conda activate alpha-beta-crown
+          cd $GITHUB_WORKSPACE/
+          python setup.py install
+          pip install -r examples/requirements.txt
+      - name: Run example tests
+        shell: bash -el {0}
+        run: |
+          source ~/miniconda3/etc/profile.d/conda.sh
+          conda init
+          conda activate alpha-beta-crown
+          cd $GITHUB_WORKSPACE/tests/
+          bash gpu_tests/run_on_free_gpu.sh -c "python test_examples_ci.py | tee temp_result.txt"
+      - name: Check example tests
+        shell: bash -el {0}
+        run: |
+          cd $GITHUB_WORKSPACE/tests/
+          result=$(cat temp_result.txt | awk '/Examples Test Result:/,0' | tr '\n' ' ')
+          echo "::notice::${result}"
+          if [[ $result == *"Failed tests:"* ]]; then
+            exit 1
+          fi
