@@ -15,6 +15,7 @@ from models.resnet_v5 import resnet_v5
 from losses.hinge_loss import hinge_loss, hinge_loss_coco
 from losses.mse_loss import mse_loss_coco
 from losses.quality_losses import ssim_loss
+from losses.customized_loss import l_infinity_loss
 from utils.hashing import compute_hash_coco
 from utils.image_processing import load_and_preprocess_img,save_images, normalize, denormalize
 from utils.logger import Logger
@@ -51,15 +52,14 @@ def optimization_thread(url_list, device, loss_fkt, logger, args, target_hashes,
         with torch.no_grad():
             outputs_unmodified = model(normalize(source))
             unmodified_hash_bin = torch.relu(torch.round(outputs_unmodified))
-            unmodified_hash_bin = torch.tensor(unmodified_hash_bin, dtype=torch.float32,
-                                                      device=target_hashes.device)
+            # unmodified_hash_bin = torch.tensor(unmodified_hash_bin, dtype=torch.float32,
+            #                                           device=target_hashes.device)
+
             l1_loss = torch.nn.L1Loss(reduction='sum')
             l1_loss_mean = torch.nn.L1Loss(reduction='mean')
             l1_loss_none = torch.nn.L1Loss(reduction='none')
             loss = l1_loss_none(unmodified_hash_bin,target_hashes).sum(dim=1)
             _, idx = torch.min(loss, dim=0)
-
-
             target_hash = target_hashes[idx.item()]
             target_hash_str = str(target_hash.cpu().tolist())
             target_hash_hex = bin_hex_hash_dict[target_hash_str]
@@ -92,21 +92,20 @@ def optimization_thread(url_list, device, loss_fkt, logger, args, target_hashes,
 
         for i in tqdm(range(10000)):
             outputs_source = model(normalize(source+delta))
-            target_loss = l1_loss_mean(
-                outputs_source, target_hash)
-            visual_loss = -1 * args.ssim_weight * \
-                          ssim_loss(source_orig, source+delta)
-
-            total_loss = target_loss + visual_loss
+            # target_loss = l1_loss_mean(
+            #     outputs_source, target_hash)
+            target_loss = l_infinity_loss(outputs_source, target_hash)
+            total_loss = target_loss
+            # print(target_loss)
+            # visual_loss = -1 * args.ssim_weight * \
+            #               ssim_loss(source_orig, source+delta)
+            # total_loss = target_loss + visual_loss
             optimizer.zero_grad()
             total_loss.backward()
             if args.edges_only:
                 optimizer.param_groups[0]['params'][0].grad *= edge_mask
-
             optimizer.step()
             delta.data.clamp_(-epsilon, epsilon)
-
-
             # with torch.no_grad():
             #     source.data = torch.clamp(source.data, min=0, max=1)
 
@@ -114,13 +113,6 @@ def optimization_thread(url_list, device, loss_fkt, logger, args, target_hashes,
             if i % args.check_interval == 0:
                 with torch.no_grad():
                     #todo: Previous save and reload has issues in normalization
-
-                    # save_images(source+delta, './temp', temp_img)
-                    # current_img = load_and_preprocess_img(
-                    #     f'./temp/{temp_img}.png', device)
-                    # check_output = model(normalize(current_img))
-                    # source_hash_hex = torch.relu(torch.round(check_output)).int()
-
                     current_img = source + delta
                     check_output = model(normalize(current_img))
                     source_hash_hex = torch.relu(torch.round(check_output)).int()
@@ -158,7 +150,7 @@ def main():
                         default='inputs/source.png', help='image to manipulate')
     parser.add_argument('--model_path', type=str,
                         default='/home/yuchen/code/verified_phash/Fast-Certified-Robust-Training/64_ep1_resv5_l1_aug2/ckpt_best.pth', help='path of model weight')
-    parser.add_argument('--learning_rate', dest='learning_rate', default=5e-4,
+    parser.add_argument('--learning_rate', dest='learning_rate', default=1e-3,
                         type=float, help='step size of PGD optimization step')
     parser.add_argument('--optimizer', dest='optimizer', default='Adam',
                         type=str, help='kind of optimizer')
@@ -179,7 +171,7 @@ def main():
     parser.add_argument('--check_interval', dest='check_interval',
                         default=10, type=int, help='Hash change interval checking')
     parser.add_argument('--epsilon',
-                        default=16./255, type=float)
+                        default=32./255, type=float)
 
     args = parser.parse_args()
 
@@ -246,14 +238,12 @@ def main():
     threads_args = (images, device, loss_function,
                     logger, args, target_hashes, bin_hex_hash_dict, target_hash_dict, model_path, args.epsilon)
 
-
     # for t in range(args.num_threads):
     #     optimization_thread(*threads_args)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=1000) as executor:
         for t in range(args.num_threads):
             executor.submit(lambda p: optimization_thread(*p), threads_args)
-
 
     logger.finish_logging()
 

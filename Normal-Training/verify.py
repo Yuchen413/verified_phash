@@ -9,7 +9,9 @@ import numpy as np
 import base64
 from resnet_v5 import resnet_v5
 from tqdm import tqdm
+import argparse
 from resnet18 import ResNet18
+import logging
 
 seed_value = 2024
 torch.manual_seed(seed_value)
@@ -17,6 +19,32 @@ torch.cuda.manual_seed(seed_value)
 torch.cuda.manual_seed_all(seed_value)  # for all GPUs
 np.random.seed(seed_value)
 random.seed(seed_value)
+
+
+class SummationLayer(nn.Module):
+    def __init__(self, input_features):
+        super(SummationLayer, self).__init__()
+        # Initialize a linear layer with input_features -> 1 output
+        self.linear = nn.Linear(input_features, 1, bias=False)
+
+        # Initialize weights to all ones, so that it effectively sums the inputs
+        with torch.no_grad():
+            self.linear.weight.fill_(1.0)
+
+    def forward(self, x):
+        # Apply the linear layer, which sums the inputs
+        return self.linear(x)
+
+class ModifiedModel(nn.Module):
+    def __init__(self, base_model):
+        super(ModifiedModel, self).__init__()
+        self.base_model = base_model
+        self.sum_layer = SummationLayer(144)
+
+    def forward(self, x):
+        x = self.base_model(x)
+        x = self.sum_layer(x)
+        return x
 
 
 def tensor_to_hash(y):
@@ -29,18 +57,6 @@ def tensor_to_hash(y):
     binary_strings = ''.join(str(i) for i in binary_array) ##010101010
 
     return y, binary_strings, encoded_str
-
-def bits_to_base64(tensor):
-    """Convert a numpy array of bits back to bytes and then to a Base64 encoded string."""
-    # Reshape bits to (-1, 8) to group them into bytes, and then pack them
-    # print(tensor)
-    tensor = (tensor >= 0.5).int()
-    torch.set_printoptions(threshold=10_000)
-    array = tensor.cpu().detach().numpy()
-    # print(len(array[0]))
-    bytes_array = np.packbits(array).tobytes()
-    encoded_str = base64.b64encode(bytes_array).decode("utf-8")
-    return str(array), encoded_str
 
 def calculate_acc(y_pred = None, y_true=None, hashes_csv = '/home/yuchen/code/verified_phash/Normal-Training/coco-val.csv'):
     hashes = []
@@ -74,16 +90,19 @@ def get_opts():
         default='coco-train.csv'
     )
     parser.add_argument("--val-data", help="Validation data", default='coco-val.csv',type=str, required=False)
-    parser.add_argument("--epochs", help="Training epochs", type=int, default=DEFAULT_EPOCHS)
-    parser.add_argument(
-        "--output",
-        help="Name of model output (without extension)",
-        type=str,
-        default=DEFAULT_OUTPUT,
-    )
-    parser.add_argument("--checkpoint-iter", help="Checkpoint frequency", type=int, default=-1)
-    parser.add_argument("--batch-size", help="Batch size", type=int, default=DEFAULT_BATCH_SIZE)
+    parser.add_argument("--epochs", help="Training epochs", type=int, default=50)
+    parser.add_argument("--checkpoint_iter", help="Checkpoint frequency", type=int, default=-1)
+    parser.add_argument("--batch_size", help="Batch size", type=int, default=1)
     parser.add_argument("--verbose", help="Print intermediate statistics", action="store_true")
+    parser.add_argument("--in_dim", default=64, type=int)
+    parser.add_argument('--epsilon',
+                        default=1. / 255, type=float)
+    parser.add_argument('--model',
+                        default='../Fast-Certified-Robust-Training/64_ep1_resv5_l1_aug2_new_collision/ckpt_best.pth', type=str)
+    parser.add_argument('--target_hash',
+                        default='../Learning-to-Break-Deep-Perceptual-Hashing/dataset_hashes/dog_10K_hashes.csv',
+                        type=str)
+
     return parser.parse_args()
 
 
@@ -94,6 +113,24 @@ def count_equal_arrays(array_list, reference_array):
         if np.array_equal(array, reference_array):
             count += 1
     return count
+
+def get_target_hash(hash_path = '../Learning-to-Break-Deep-Perceptual-Hashing/dataset_hashes/dog_10K_hashes.csv'):
+    target_hash_dict = dict()
+    bin_hex_hash_dict = dict()
+    target_hashes = []
+    with open(hash_path, newline='') as csvfile:
+        reader = csv.reader(csvfile, delimiter=',')
+        next(reader, None)  # skip header
+        for row in reader:
+            hash_string = row[2].strip('][').split()
+            hash = [int(b) for b in list(hash_string)]
+            # hash = torch.tensor(hash).unsqueeze(0).to(device)
+            target_hash_dict[row[3]] = [str(hash), row[1]]
+            target_hash = torch.tensor(hash).unsqueeze(0)
+            bin_hex_hash_dict[str(hash)] = row[3]
+            target_hashes.append(target_hash)
+        target_hashes = torch.cat(target_hashes, dim=0).cuda()
+    return target_hashes
 
 def get_predict(model, val_dataloader, use_cuda):
     model.eval()
@@ -113,12 +150,16 @@ def get_predict(model, val_dataloader, use_cuda):
     # print('MSE', loss/len(val_dataloader))
     return acc/len(val_dataloader), loss/len(val_dataloader)
 
-def get_predict_usenix(model, val_dataloader, use_cuda, eps=0.0):
+def get_evasion(model, val_dataloader, use_cuda, eps=0.0):
     model.eval()
-    total_loss = 0.0
-    error = 0
+    total_eva_loss = 0.0
+    evasion = 0
+    collision = 0
     num_samples = 0
     l = nn.L1Loss(reduction='none')
+    model = BoundedModule(model, torch.zeros(1, 3, 64, 64), bound_opts={"conv_mode": "patches"})
+    model.eval()
+
     # num_batched = 1
 
     with torch.no_grad():
@@ -129,30 +170,26 @@ def get_predict_usenix(model, val_dataloader, use_cuda, eps=0.0):
                     x = x.cuda()
                     y_t = y_t.cuda()
 
-                if eps == 0.0:
-                    y_p = model(x) #raw tensors
-                    post_y_p = torch.relu(torch.round(y_p))
-                    batch_loss = l(y_t, post_y_p)
-                    error += torch.sum(batch_loss.sum(1) >= 1800).item()
-                    total_loss += batch_loss.sum()
-                    num_samples += x.size(0)
-                    # post_y_p = y_p.to(torch.uint8)
+                norm = np.inf
+                ptb = PerturbationLpNorm(norm=norm, eps=eps)
+                bounded_image = BoundedTensor(x, ptb)
+                y_clean = torch.relu(torch.round(model(x)))
 
-                else:
-                    norm = np.inf
-                    ptb = PerturbationLpNorm(norm=norm, eps=eps)
-                    bounded_image = BoundedTensor(x, ptb)
-                    y_clean = torch.relu(torch.round(model(x)))
-                    lb, ub = model.compute_bounds(x=(bounded_image,), method='CROWN')
-                    post_lb = torch.relu(torch.round(lb))
-                    post_ub = torch.relu(torch.round(ub))
-                    loss_lb = l(post_lb, y_clean)
-                    loss_ub = l(post_ub, y_clean)
-                    total_loss += max(loss_ub.sum(), loss_lb.sum())
-                    robust_err_lb = torch.sum(loss_lb.sum(1) >= 1800).item()
-                    robust_err_ub = torch.sum(loss_ub.sum(1) >= 1800).item()
-                    error += max(robust_err_ub, robust_err_lb)
-                    num_samples += x.size(0)
+
+                lb, ub = model.compute_bounds(x=(bounded_image,), method='CROWN')
+                post_lb = torch.relu(torch.round(lb))
+                post_ub = torch.relu(torch.round(ub))
+                loss_eva_lb = l(post_lb, y_clean)
+                loss_eva_ub = l(post_ub, y_clean)
+                print('LB-evasion', loss_eva_lb.sum(1))
+                print('UB-evasion', loss_eva_ub.sum(1))
+
+                # Evasion
+                robust_eva_lb = torch.sum(loss_eva_lb.sum(1) >= 1800).item()
+                robust_eva_ub = torch.sum(loss_eva_ub.sum(1) >= 1800).item()
+                evasion += max(robust_eva_ub, robust_eva_lb)
+
+                num_samples += x.size(0)
 
             except RuntimeError as e:
                 if 'CUDA out of memory' in str(e):
@@ -161,36 +198,96 @@ def get_predict_usenix(model, val_dataloader, use_cuda, eps=0.0):
                 else:
                     raise  # Re-raise the exception if it's not a memory error
 
-            # if i >= num_batched-1:
-            #     break
-
     # Calculate average loss and accuracy
-    average_loss = total_loss / num_samples
-    error_rate = error / num_samples
+    # average_loss = total_loss / num_samples
+    evasion_rate = evasion / num_samples
+    collision_rate = collision / num_samples
 
-    print(f"Average L1 Loss: {average_loss:.4f}")
-    print(f"Regular Error Rate: {error_rate * 100:.2f}%")
-    return error_rate, average_loss
+    # print(f"Average L1 Loss: {average_loss:.4f}")
+    print(f"Evasion Rate: {evasion_rate * 100:.2f}%")
+    print(f"Collision Rate: {collision_rate * 100:.2f}%")
+    return evasion_rate, collision_rate
 
-INPUT_DIM = 64
-DEFAULT_EPOCHS = 50
-DEFAULT_OUTPUT = "coco-hash-model"
-DEFAULT_BATCH_SIZE = 1
+def get_preimage(model_ori, val_dataloader,use_cuda, eps):
+    with torch.no_grad():
+        for i, data in enumerate(tqdm(val_dataloader)):
+            try:
+                x, y_t = data
+                if use_cuda:
+                    x = x.cuda()
+                    y_t = y_t.cuda()
 
-opts = get_opts()
-use_cuda = check_cuda()
-val_data = ImageToHashAugmented(opts.val_data, opts.data_dir, resize=INPUT_DIM, num_augmented=0)
-val_dataloader = DataLoader(val_data, batch_size=DEFAULT_BATCH_SIZE, shuffle=True, pin_memory=True)
+                y_clean = torch.relu(torch.round(model_ori(x)))
+                print(y_clean.shape)
+                apply_output_constraints_to = ['BoundInput','/input.1']
+                # model = BoundedModule(model_ori, torch.empty_like(x), bound_opts={"conv_mode": "patches"})
+                model = BoundedModule(model_ori, torch.empty_like(x), bound_opts={
+                    "conv_mode": "patches",
+                    'optimize_bound_args': {
+                        'apply_output_constraints_to': apply_output_constraints_to,
+                        'tighten_input_bounds': True,
+                        'best_of_oc_and_no_oc': False,
+                        'directly_optimize': [],
+                        'oc_lr': 0.1,
+                        'share_gammas': False,
+                        'iteration': 1000,
+                    }
+                })
 
-model = resnet_v5(num_classes=144, input_dim=INPUT_DIM)
-model_weights = torch.load('../Fast-Certified-Robust-Training/64_ep1_resv5_l1_aug2_new_collision/ckpt_best.pth')
-# model_weights = torch.load('64-coco-hash-resnetv5-l1-aug2-new.pt')
-model.load_state_dict(model_weights)
-model.cuda()
-model.eval()
+                print(model)
 
-bounded_model = BoundedModule(model, torch.zeros(1, 3, 64, 64), bound_opts={"conv_mode": "patches"})
-bounded_model.eval()
+                model.eval()
+                # # # Constraint tensor to ensure y - y_clean <= 1800 and y_clean - y <= 1800
+                # # # Equivalent to -y + y_clean <= 1800 and y - y_clean <= 1800
+                constraint = torch.tensor([[[1., -1.], [-1., 1.]]], device=y_clean.device)
+                threshold = torch.tensor([1800., 1800.], device=y_clean.device)
+                # # Assuming model is already defined
+                model.constraints = constraint
+                model.thresholds = threshold
 
-err, _ = get_predict_usenix(bounded_model, val_dataloader, use_cuda, eps=0.03137)
-# match_rate, _ = get_predict(bounded_model , val_dataloader, use_cuda)
+
+                norm = float("inf")
+                ptb = PerturbationLpNorm(norm=norm, eps=eps)
+                # lower = torch.zeros_like(x).cuda()
+                # upper = torch.ones_like(x).cuda()
+                # ptb = PerturbationLpNorm(norm=norm, x_L=lower, x_U=upper)
+                bounded_x = BoundedTensor(x, ptb)
+                lb, ub = model.compute_bounds(x=(bounded_x,), method='alpha-CROWN')
+                tightened_ptb = model['/input.1'].perturbation
+                print(lb)
+                print(ub)
+                print(tightened_ptb.x_L)
+                print(tightened_ptb.x_U)
+
+            except RuntimeError as e:
+                if 'CUDA out of memory' in str(e):
+                    print(f"Error: CUDA out of memory.")
+                    break  # Break out of the loop on CUDA memory error
+                else:
+                    raise  # Re-raise the exception if it's not a memory error
+
+def main():
+    opts = get_opts()
+    use_cuda = check_cuda()
+    val_data = ImageToHashAugmented(opts.val_data, opts.data_dir, resize=opts.in_dim, num_augmented=0)
+    val_dataloader = DataLoader(val_data, batch_size=opts.batch_size, shuffle=True, pin_memory=True)
+    model = resnet_v5(num_classes=144, input_dim=opts.in_dim)
+    model_weights = torch.load(opts.model)
+    model.load_state_dict(model_weights)
+
+    sum_model = ModifiedModel(model)
+    # sum_model = model
+    sum_model.cuda()
+    sum_model.eval()
+
+
+    get_preimage(sum_model, val_dataloader, use_cuda, eps=opts.epsilon)
+
+
+    # evasion_rate = get_evasion(bounded_model, val_dataloader, use_cuda, eps=opts.epsilon)
+    # os.makedirs('verify_results', exist_ok=True)
+    # logging.basicConfig(filename=f'verify_results/{opts.epsilon}.log', level=logging.INFO)
+    # logging.info(f'Epsilon: {opts.epsilon}, Evasion Rate: {evasion_rate}')
+
+if __name__ == "__main__":
+    main()

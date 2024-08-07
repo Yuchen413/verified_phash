@@ -37,7 +37,7 @@ class TestInvpropSimpleExample(TestCase):
 
         apply_output_constraints_to = ['BoundMatMul', 'BoundInput']
         x = torch.tensor([[1., 1.]])
-        model = BoundedModule(model_ori, torch.empty_like(x), device="cpu", bound_opts={
+        model = BoundedModule(model_ori, torch.empty_like(x), device="cuda", bound_opts={
             'optimize_bound_args': {
                 'apply_output_constraints_to': apply_output_constraints_to,
                 'tighten_input_bounds': True,
@@ -148,7 +148,9 @@ class TestInvpropOODExample(TestCase):
 
 
 if __name__ == '__main__':
-    testcase = TestInvpropSimpleExample(generate=False)
+    testcase = TestInvpropSimpleExample(generate=True)
     testcase.test()
-    testcase = TestInvpropOODExample(generate=False)
-    testcase.test()
+    # testcase = TestInvpropOODExample(generate=False)
+    # testcase.test()
+
+

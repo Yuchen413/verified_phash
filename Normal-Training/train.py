@@ -20,7 +20,7 @@ np.random.seed(seed_value)
 random.seed(seed_value)
 
 DEFAULT_EPOCHS = 20
-DEFAULT_OUTPUT = "64-coco-hash-resnetv5-l1-aug2-new-c"
+DEFAULT_OUTPUT = "64-coco-hash-resnetv5-l1-aug2-new-c-nonormalize"
 DEFAULT_BATCH_SIZE = 256
 
 
@@ -54,7 +54,7 @@ def main():
     opts = get_opts()
     use_cuda = check_cuda()
     resize = 64 ##for resize
-    lambda_c = 1 ##yc: weight parameter for collision loss previous 0.1
+    lambda_c = 0 ##yc: weight parameter for collision loss previous 0.1
     num_augmented = 2 ##yc:used in ImageToHashAugmented, if 0, then using original image only; if >0, then using original image and num_agumented augmented images.
     adv = False
     # init model
@@ -107,7 +107,6 @@ def main():
                     loss = e_loss
                 else:
                     c_loss = collision_loss_fn(y_p)
-                    # c_loss = 0
                     loss = e_loss + lambda_c*c_loss
                     print('Evasion loss', e_loss)
                     print('Collision loss', c_loss)

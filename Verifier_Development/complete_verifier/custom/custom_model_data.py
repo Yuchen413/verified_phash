@@ -574,12 +574,14 @@ def custom_coco_dataset(spec):
     hashes_csv = "../../Normal-Training/coco-val.csv"
     image_dir = "../../Normal-Training/"
     dataset = ImageToHash(hashes_csv, image_dir, resize=64)
-    testloader = torch.utils.data.DataLoader(dataset, batch_size=64, shuffle=False, num_workers=4)
+    testloader = torch.utils.data.DataLoader(dataset, batch_size=1, shuffle=False)
 
     X, labels = next(iter(testloader))
     # Set data_max and data_min to be None if no clip. For CIFAR-10 we clip to [0,1].
-    data_max = torch.reshape((1. - mean) / std, (1, -1, 1, 1))
-    data_min = torch.reshape((0. - mean) / std, (1, -1, 1, 1))
+    # data_max = torch.reshape((1. - mean) / std, (1, -1, 1, 1))
+    # data_min = torch.reshape((0. - mean) / std, (1, -1, 1, 1))
+    data_max = None
+    data_min = None
     if eps is None:
         raise ValueError('You must specify an epsilon')
     # Rescale epsilon.
