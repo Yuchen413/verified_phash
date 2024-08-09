@@ -8,9 +8,9 @@ from argparse import ArgumentParser
 import numpy as np
 import base64
 from resnet_v5 import resnet_v5
+from resnet import model_resnet
 from tqdm import tqdm
 import argparse
-from resnet18 import ResNet18
 import logging
 
 seed_value = 2024
@@ -20,6 +20,13 @@ torch.cuda.manual_seed_all(seed_value)  # for all GPUs
 np.random.seed(seed_value)
 random.seed(seed_value)
 
+def post_photodna(x):
+    return torch.relu(torch.round(x))
+
+def post_pdq(x):
+    labels = torch.relu(x) > 0.5
+    # print(labels)
+    return labels.int()
 
 class SummationLayer(nn.Module):
     def __init__(self, input_features):
@@ -150,14 +157,14 @@ def get_predict(model, val_dataloader, use_cuda):
     # print('MSE', loss/len(val_dataloader))
     return acc/len(val_dataloader), loss/len(val_dataloader)
 
-def get_evasion(model, val_dataloader, use_cuda, eps=0.0):
+def get_evasion(model, val_dataloader, use_cuda, eps, dummy_input, threshold=90):
     model.eval()
     total_eva_loss = 0.0
     evasion = 0
     collision = 0
     num_samples = 0
     l = nn.L1Loss(reduction='none')
-    model = BoundedModule(model, torch.zeros(1, 3, 64, 64), bound_opts={"conv_mode": "patches"})
+    model = BoundedModule(model, dummy_input, bound_opts={"conv_mode": "patches"})
     model.eval()
 
     # num_batched = 1
@@ -173,20 +180,18 @@ def get_evasion(model, val_dataloader, use_cuda, eps=0.0):
                 norm = np.inf
                 ptb = PerturbationLpNorm(norm=norm, eps=eps)
                 bounded_image = BoundedTensor(x, ptb)
-                y_clean = torch.relu(torch.round(model(x)))
-
-
+                y_clean = post_pdq(model(x))
                 lb, ub = model.compute_bounds(x=(bounded_image,), method='CROWN')
-                post_lb = torch.relu(torch.round(lb))
-                post_ub = torch.relu(torch.round(ub))
+                post_lb = post_pdq(lb)
+                post_ub = post_pdq(ub)
                 loss_eva_lb = l(post_lb, y_clean)
                 loss_eva_ub = l(post_ub, y_clean)
-                print('LB-evasion', loss_eva_lb.sum(1))
-                print('UB-evasion', loss_eva_ub.sum(1))
+                # print('LB-evasion', loss_eva_lb.sum(1))
+                # print('UB-evasion', loss_eva_ub.sum(1))
 
                 # Evasion
-                robust_eva_lb = torch.sum(loss_eva_lb.sum(1) >= 1800).item()
-                robust_eva_ub = torch.sum(loss_eva_ub.sum(1) >= 1800).item()
+                robust_eva_lb = torch.sum(loss_eva_lb.sum(1) >= threshold).item()
+                robust_eva_ub = torch.sum(loss_eva_ub.sum(1) >= threshold).item()
                 evasion += max(robust_eva_ub, robust_eva_lb)
 
                 num_samples += x.size(0)
@@ -201,93 +206,29 @@ def get_evasion(model, val_dataloader, use_cuda, eps=0.0):
     # Calculate average loss and accuracy
     # average_loss = total_loss / num_samples
     evasion_rate = evasion / num_samples
-    collision_rate = collision / num_samples
+    # collision_rate = collision / num_samples
 
     # print(f"Average L1 Loss: {average_loss:.4f}")
     print(f"Evasion Rate: {evasion_rate * 100:.2f}%")
-    print(f"Collision Rate: {collision_rate * 100:.2f}%")
-    return evasion_rate, collision_rate
-
-def get_preimage(model_ori, val_dataloader,use_cuda, eps):
-    with torch.no_grad():
-        for i, data in enumerate(tqdm(val_dataloader)):
-            try:
-                x, y_t = data
-                if use_cuda:
-                    x = x.cuda()
-                    y_t = y_t.cuda()
-
-                y_clean = torch.relu(torch.round(model_ori(x)))
-                print(y_clean.shape)
-                apply_output_constraints_to = ['BoundInput','/input.1']
-                # model = BoundedModule(model_ori, torch.empty_like(x), bound_opts={"conv_mode": "patches"})
-                model = BoundedModule(model_ori, torch.empty_like(x), bound_opts={
-                    "conv_mode": "patches",
-                    'optimize_bound_args': {
-                        'apply_output_constraints_to': apply_output_constraints_to,
-                        'tighten_input_bounds': True,
-                        'best_of_oc_and_no_oc': False,
-                        'directly_optimize': [],
-                        'oc_lr': 0.1,
-                        'share_gammas': False,
-                        'iteration': 1000,
-                    }
-                })
-
-                print(model)
-
-                model.eval()
-                # # # Constraint tensor to ensure y - y_clean <= 1800 and y_clean - y <= 1800
-                # # # Equivalent to -y + y_clean <= 1800 and y - y_clean <= 1800
-                constraint = torch.tensor([[[1., -1.], [-1., 1.]]], device=y_clean.device)
-                threshold = torch.tensor([1800., 1800.], device=y_clean.device)
-                # # Assuming model is already defined
-                model.constraints = constraint
-                model.thresholds = threshold
-
-
-                norm = float("inf")
-                ptb = PerturbationLpNorm(norm=norm, eps=eps)
-                # lower = torch.zeros_like(x).cuda()
-                # upper = torch.ones_like(x).cuda()
-                # ptb = PerturbationLpNorm(norm=norm, x_L=lower, x_U=upper)
-                bounded_x = BoundedTensor(x, ptb)
-                lb, ub = model.compute_bounds(x=(bounded_x,), method='alpha-CROWN')
-                tightened_ptb = model['/input.1'].perturbation
-                print(lb)
-                print(ub)
-                print(tightened_ptb.x_L)
-                print(tightened_ptb.x_U)
-
-            except RuntimeError as e:
-                if 'CUDA out of memory' in str(e):
-                    print(f"Error: CUDA out of memory.")
-                    break  # Break out of the loop on CUDA memory error
-                else:
-                    raise  # Re-raise the exception if it's not a memory error
+    # print(f"Collision Rate: {collision_rate * 100:.2f}%")
+    return evasion_rate
 
 def main():
     opts = get_opts()
+    opts.val_data = 'mnist/mnist_test.csv'
+    opts.in_dim= 28
     use_cuda = check_cuda()
-    val_data = ImageToHashAugmented(opts.val_data, opts.data_dir, resize=opts.in_dim, num_augmented=0)
+    val_data = ImageToHashAugmented_PDQ(opts.val_data, opts.data_dir, resize=opts.in_dim, num_augmented=0)
     val_dataloader = DataLoader(val_data, batch_size=opts.batch_size, shuffle=True, pin_memory=True)
-    model = resnet_v5(num_classes=144, input_dim=opts.in_dim)
+    # model = resnet_v5(num_classes=144, input_dim=opts.in_dim)
+    model = model_resnet(in_ch=1, in_dim=opts.in_dim)
     model_weights = torch.load(opts.model)
     model.load_state_dict(model_weights)
-
-    sum_model = ModifiedModel(model)
-    # sum_model = model
-    sum_model.cuda()
-    sum_model.eval()
+    model.cuda()
+    dummy_input = torch.zeros(1, 1, opts.in_dim, opts.in_dim)
+    get_evasion(model, val_dataloader, use_cuda, eps=opts.epsilon, dummy_input=dummy_input)
 
 
-    get_preimage(sum_model, val_dataloader, use_cuda, eps=opts.epsilon)
-
-
-    # evasion_rate = get_evasion(bounded_model, val_dataloader, use_cuda, eps=opts.epsilon)
-    # os.makedirs('verify_results', exist_ok=True)
-    # logging.basicConfig(filename=f'verify_results/{opts.epsilon}.log', level=logging.INFO)
-    # logging.info(f'Epsilon: {opts.epsilon}, Evasion Rate: {evasion_rate}')
 
 if __name__ == "__main__":
     main()

@@ -219,20 +219,74 @@ class ImageToHashAugmented(Dataset):
 
         return img, torch.tensor(h).float()
 
+class ImageToHashAugmented_PDQ(Dataset):
+    def __init__(self, hashes_csv, image_dir, resize, num_augmented=0):
+        self.image_dir = image_dir
+        self.resize = resize
+        self.num_augmented = num_augmented
+        self.names_and_hashes = []
+        with open(hashes_csv) as f:
+            r = csv.reader(f)
+            for line in r:
+                path = line[0]
+                # h = np.array(list(base64.b64decode(line[1])), dtype=np.uint8)
+                h = torch.tensor([int(bit) for bit in line[1].strip('[]').split()], dtype=torch.float)
+                # h = np.unpackbits(np.frombuffer(base64.b64decode(line[1]), dtype=np.uint8)) #into 01010110
+                self.names_and_hashes.append((path, h))
+
+        self.rotate_transforms = [
+            transforms.RandomRotation(64),
+            transforms.RandomRotation(16),
+            ]
+
+
+        self.crop_transforms = [
+            transforms.RandomCrop(self.resize, 2, padding_mode='edge'),]
+
+        # Define a list of possible transformations
+        self.base_transforms = [
+            transforms.RandomHorizontalFlip(),
+            transforms.RandomVerticalFlip(),
+            transforms.ColorJitter(brightness=(0,2), contrast=(0,2), saturation=(0,2), hue=0.5),
+            transforms.RandomPerspective(distortion_scale=0.2, p=1),
+            transforms.RandomAffine(degrees=10, translate=(0.1, 0.1), scale=(0.8, 1.2)),
+        ]
+
+    def __len__(self):
+        return len(self.names_and_hashes)
+
+    def __getitem__(self, idx):
+        name, h = self.names_and_hashes[idx]
+        img_path = os.path.join(self.image_dir, name)
+        img = read_image(img_path).float() / 255.0
+
+        transformations = []
+        if self.num_augmented > 0:
+            num_transformations_to_apply = random.randint(0, self.num_augmented)
+            if num_transformations_to_apply > 0:
+                transformations += random.sample(self.base_transforms,min(len(self.base_transforms), self.num_augmented))
+                transformations += self.crop_transforms
+                transformations.append(random.choice(self.rotate_transforms))
+                # transformations.append(random.choice(self.crop_transforms))
+
+        transformations += [
+            transforms.Resize(self.resize),
+        ]
+
+        transform_pipeline = transforms.Compose(transformations)
+        img = transform_pipeline(img)
+
+        return img, h
+
 
 def load_data(args, data, batch_size, test_batch_size, use_index=False, aug=True):
     if data == 'MNIST':
-        """Fix 403 Forbidden error in downloading MNIST
-        See https://github.com/pytorch/vision/issues/1938."""
-        from six.moves import urllib
-        opener = urllib.request.build_opener()
-        opener.addheaders = [('User-agent', 'Mozilla/5.0')]
-        urllib.request.install_opener(opener)  
-              
+        input_dim = 28
         dummy_input = torch.randn(2, 1, 28, 28)
-        mean, std = torch.tensor([0.0]), torch.tensor([1.0])
-        train_data = MNIST('./data', train=True, download=True, transform=transforms.ToTensor(), use_index=use_index)
-        test_data = MNIST('./data', train=False, download=True, transform=transforms.ToTensor(), use_index=use_index)
+        mean = torch.tensor([0.0])
+        std = torch.tensor([1.0])
+        train_data = ImageToHashAugmented_PDQ('../Normal-Training/mnist/mnist_train.csv', '../Normal-Training', resize=input_dim, num_augmented=2)
+        test_data = ImageToHashAugmented_PDQ('../Normal-Training/mnist/mnist_test.csv', '../Normal-Training', resize=input_dim, num_augmented=0)
     elif data == 'CIFAR':
         mean = torch.tensor(cifar10_mean)
         std = torch.tensor([0.2, 0.2, 0.2] if args.lip or args.global_lip or 'lip' in args.model else cifar10_std)

@@ -31,7 +31,7 @@ class DenseSequential(nn.Sequential):
         return xs[-1]
 
 
-def resnet(in_ch=3, in_dim=32, width=1, mult=16, N=1):
+def model_resnet(in_ch=3, in_dim=32, width=1, mult=16, N=1):
     def block(in_filters, out_filters, k, downsample):
         if not downsample:
             k_first = 3
@@ -84,7 +84,7 @@ def resnet(in_ch=3, in_dim=32, width=1, mult=16, N=1):
 
 
 if __name__ == "__main__":
-    model = resnet(in_ch=1, in_dim=28)
+    model = model_resnet(in_ch=1, in_dim=28)
     dummy = torch.randn(8, 1, 28, 28)
     print(model)
     print(model(dummy).shape)
