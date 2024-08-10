@@ -63,7 +63,7 @@ class ModifiedModel(nn.Module):
         x = self.remove_c(x)
         x = x.reshape(1,self.channel,self.in_dim, self.in_dim)
         x = self.orig_model(x)
-        #
+        x = self.sum_layer(x)
         return x
 
 
@@ -89,7 +89,7 @@ def get_opts():
     parser.add_argument("--verbose", help="Print intermediate statistics", action="store_true")
     parser.add_argument("--in_dim", default=64, type=int)
     parser.add_argument('--epsilon',
-                        default=8. / 255, type=float)
+                        default=64. / 255, type=float)
     parser.add_argument('--model',
                         default='../Fast-Certified-Robust-Training/32_ep1_resv5_fast/ckpt_best.pth', type=str)
     return parser.parse_args()
@@ -98,6 +98,7 @@ def get_opts():
 
 def get_preimage(model_ori, val_dataloader,use_cuda, eps, dummy_input, threshold=90):
     # with torch.no_grad():
+    l = nn.L1Loss(reduction='none')
     apply_output_constraints_to = ['BoundMatMul', 'BoundInput']
     model = BoundedModule(model_ori, dummy_input, bound_opts={
         "conv_mode": "patches",
@@ -111,7 +112,6 @@ def get_preimage(model_ori, val_dataloader,use_cuda, eps, dummy_input, threshold
             'iteration': 1000,
         }
     })
-
     for i, data in enumerate(tqdm(val_dataloader)):
             try:
                 x, y_t = data
@@ -120,26 +120,28 @@ def get_preimage(model_ori, val_dataloader,use_cuda, eps, dummy_input, threshold
                     y_t = y_t.cuda()
 
                 model.eval()
-
-                # TODO: Is this constraint defined correct?
-                model.constraints = torch.ones((1, 1, 256))
-                model.thresholds = torch.tensor([threshold])
+                y_clean = model(x)
 
                 norm = float("inf")
                 lower = torch.clamp(x - eps, min=0)  # Ensuring lower bounds are not less than 0
                 upper = torch.clamp(x + eps, max=1)  # Ensuring upper bounds do not exceed 1
                 ptb = PerturbationLpNorm(norm=norm, x_L = lower, x_U = upper, eps=eps)
                 bounded_x = BoundedTensor(x, ptb)
-
-                # c = torch.tensor([[[1., -1.]]])
-                # Init manually, to set bound_upper=False
-                # model.init_alpha(x=(bounded_x,), share_alphas=False, c = constraint, bound_upper=False)
+                # TODO: Randomize a dummy constraints with specific shape first, otherwise have errors in calculating lb, ub.
+                # Todo: I add a last layer to sum all entries into one value, so the shape of constraint is (1, 1, 1)
+                model.constraints = torch.tensor([[[1.]]])
+                model.thresholds = torch.tensor([threshold])
 
                 lb, ub = model.compute_bounds(x=(bounded_x,),method='CROWN-Optimized')
+
+                # TODO: upate the constrainst by the follwing l1_norm between lb/ub and y_clean
+                l1_difference = max(l(lb, y_clean), l(ub, y_clean))
+                model.constraints = torch.tensor([[[l1_difference]]])
                 tightened_ptb = model['/0'].perturbation
-                print('x:', x)
+
                 print('xL:',tightened_ptb.x_L)
                 print('xU:',tightened_ptb.x_U)
+
                 # ori_image = x.squeeze().cpu().detach().numpy()
                 # lb_image = tightened_ptb.x_L.squeeze().cpu().detach().numpy()
                 # ub_image = tightened_ptb.x_U.squeeze().cpu().detach().numpy()
