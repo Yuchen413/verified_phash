@@ -1,4 +1,0 @@
-*.npz
-*.tgz
-**/master_outputs
-!**/references/*/*.out
