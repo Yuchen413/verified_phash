@@ -150,6 +150,10 @@ class ImageToHashAugmented(Dataset):
 
         # Define a list of possible transformations
         self.base_transforms = [
+            transforms.RandomRotation(64),
+            transforms.RandomRotation(16),
+            transforms.RandomCrop(resize, 2, padding_mode='edge'),
+
             transforms.RandomHorizontalFlip(),
             transforms.RandomVerticalFlip(),
             transforms.ColorJitter(brightness=(0,2), contrast=(0,2), saturation=(0,2), hue=0.5),
@@ -170,8 +174,8 @@ class ImageToHashAugmented(Dataset):
             num_transformations_to_apply = random.randint(0, self.num_augmented)
             if num_transformations_to_apply > 0:
                 transformations += random.sample(self.base_transforms,min(len(self.base_transforms), self.num_augmented))
-                transformations += self.crop_transforms
-                transformations.append(random.choice(self.rotate_transforms))
+                # transformations += self.crop_transforms
+                # transformations.append(random.choice(self.rotate_transforms))
                 # transformations.append(random.choice(self.crop_transforms))
 
         transformations += [
@@ -204,12 +208,15 @@ class ImageToHashAugmented_PDQ(Dataset):
             transforms.RandomRotation(16),
             ]
 
-
         self.crop_transforms = [
             transforms.RandomCrop(self.resize, 2, padding_mode='edge'),]
 
         # Define a list of possible transformations
         self.base_transforms = [
+            transforms.RandomRotation(64),
+            transforms.RandomRotation(16),
+            transforms.RandomCrop(self.resize, 2, padding_mode='edge'),
+
             transforms.RandomHorizontalFlip(),
             transforms.RandomVerticalFlip(),
             transforms.ColorJitter(brightness=(0,2), contrast=(0,2), saturation=(0,2), hue=0.5),
@@ -230,8 +237,8 @@ class ImageToHashAugmented_PDQ(Dataset):
             num_transformations_to_apply = random.randint(0, self.num_augmented)
             if num_transformations_to_apply > 0:
                 transformations += random.sample(self.base_transforms,min(len(self.base_transforms), self.num_augmented))
-                transformations += self.crop_transforms
-                transformations.append(random.choice(self.rotate_transforms))
+                # transformations += self.crop_transforms
+                # transformations.append(random.choice(self.rotate_transforms))
                 # transformations.append(random.choice(self.crop_transforms))
 
         transformations += [
