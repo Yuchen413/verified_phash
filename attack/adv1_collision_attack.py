@@ -3,6 +3,8 @@ import concurrent.futures
 import csv
 import os
 import threading
+import warnings
+warnings.filterwarnings("ignore")
 from os.path import isfile, join
 from random import randint
 
@@ -10,60 +12,82 @@ import torch
 import torchvision.transforms as T
 from skimage import feature
 
-# from models.neuralhash import NeuralHash
 from models.resnet_v5 import resnet_v5
-from losses.hinge_loss import hinge_loss, hinge_loss_coco
-from losses.mse_loss import mse_loss_coco
-from losses.quality_losses import ssim_loss
-from losses.customized_loss import l_infinity_loss
-from utils.hashing import compute_hash_coco
+from models.resnet import resnet
+import shutil
+
+# from losses.hinge_loss import hinge_loss, hinge_loss_coco
+# from losses.mse_loss import mse_loss_coco
+# from losses.quality_losses import ssim_loss
+# from losses.customized_loss import l_infinity_loss
+# from utils.hashing import compute_hash_coco
 from utils.image_processing import load_and_preprocess_img,save_images, normalize, denormalize
 from utils.logger import Logger
 import threading
 from tqdm import tqdm
 import numpy as np
+import random
+import pandas as pd
 
 
-def optimization_thread(url_list, device, loss_fkt, logger, args, target_hashes, bin_hex_hash_dict, target_hash_dict, model_path, epsilon):
-    print(f'Process {threading.get_ident()} started for COCO')
-    id = randint(1, 1000000)
-    temp_img = f'curr_image_{id}'
-    model = resnet_v5(input_dim=64)
-    # model_weights = torch.load('/home/yuchen/code/verified_phash/Normal-Training/64-coco-hash-resnetv5-l1.pt')
+def optimization_thread(url_list, device, logger, args, model_path, epsilon, data):
+    print(f'Process {threading.get_ident()} started')
+    if data == 'mnist':
+        model = resnet(in_ch=1, in_dim=28)
+        theshold = 90
+    else:
+        model = resnet_v5(input_dim=64)
+        theshold = 1800
     model_weights = torch.load(model_path)
     model.load_state_dict(model_weights)
     model.eval()
     model.cuda()
+    url_list_copy = url_list.copy()
 
     # Start optimizing images
     while (url_list != []):
         print(len(url_list))
-        img = url_list.pop(0)
+        img = url_list.pop(0)  # Pop the first image from the original list
+        target_hashes = []
+        if data == 'mnist':
+            # Since the same class in mnist looks very similar, so they should be not considered as collision
+            this_round = [x for x in url_list_copy if
+                          x.split('/')[-1].split('_')[0] != img.split('/')[-1].split('_')[0]]
+        else:
+            this_round = [x for x in url_list_copy if x != img]
+        for random_img in this_round:
+            tensor = load_and_preprocess_img(random_img, device, data)
+            with torch.no_grad():
+                target_hash = torch.relu(torch.round(model(normalize(tensor,data))))
+            target_hashes.append(target_hash.squeeze(0))
+        target_hashes = torch.stack(target_hashes)
+
         # Store and reload source image to avoid image changes due to different formats
-        source = load_and_preprocess_img(img, device)
-        # source = normalize(source)
+        #todo load_img Change to per data
+        source = load_and_preprocess_img(img, device,data)
         input_file_name = img.rsplit(sep='/', maxsplit=1)[1].split('.')[0]
         if args.output_folder != '':
             save_images(source, args.output_folder, f'{input_file_name}')
         source_orig = source.clone()
         delta = torch.zeros_like(source, requires_grad=True)
 
-
         with torch.no_grad():
-            outputs_unmodified = model(normalize(source))
+            outputs_unmodified = model(normalize(source,data))
+            #todo Change to preprocess
             unmodified_hash_bin = torch.relu(torch.round(outputs_unmodified))
-            # unmodified_hash_bin = torch.tensor(unmodified_hash_bin, dtype=torch.float32,
-            #                                           device=target_hashes.device)
-
             l1_loss = torch.nn.L1Loss(reduction='sum')
             l1_loss_mean = torch.nn.L1Loss(reduction='mean')
             l1_loss_none = torch.nn.L1Loss(reduction='none')
-            loss = l1_loss_none(unmodified_hash_bin,target_hashes).sum(dim=1)
-            _, idx = torch.min(loss, dim=0)
+            l2_loss = torch.nn.MSELoss()
+
+            #todo Change to one random select images within the testing dataset
+
+            loss = l1_loss_none(unmodified_hash_bin,target_hashes).sum(dim=-1)
+            value, idx = torch.min(loss, dim=0)
             target_hash = target_hashes[idx.item()]
-            target_hash_str = str(target_hash.cpu().tolist())
-            target_hash_hex = bin_hex_hash_dict[target_hash_str]
             target_hash = target_hash.unsqueeze(0)
+            target_path = this_round[idx.item()]
+            # print('This is the path of preimage:', target_path)
 
             if args.edges_only:
                 # Compute edge mask
@@ -74,30 +98,22 @@ def optimization_thread(url_list, device, loss_fkt, logger, args, target_hashes,
                 edges = feature.canny(image_gray, sigma=3).astype(int)
                 edge_mask = torch.from_numpy(edges).to(device)
 
-        # Apply attack
-        # source.requires_grad = True
+        #Apply attack
         if args.optimizer == 'Adam':
-            # optimizer = torch.optim.Adam(
-            #     params=[source], lr=args.learning_rate)
             optimizer = torch.optim.Adam(
                 params=[delta], lr=args.learning_rate)
         elif args.optimizer == 'SGD':
-            # optimizer = torch.optim.SGD(
-            #     params=[source], lr=args.learning_rate)
             optimizer = torch.optim.SGD(
                 params=[delta], lr=args.learning_rate)
         else:
             raise RuntimeError(
                 f'{args.optimizer} is no valid optimizer class. Please select --optimizer out of [Adam, SGD]')
 
-        for i in tqdm(range(10000)):
-            outputs_source = model(normalize(source+delta))
-            target_loss = l1_loss_mean(
-                outputs_source, target_hash)
-            # target_loss = l_infinity_loss(outputs_source, target_hash)
+
+        for i in tqdm(range(2000)):
+            outputs_source = model(normalize(source+delta,data))
+            target_loss = l1_loss_mean(outputs_source, target_hash)
             total_loss = target_loss
-            # print(total_loss)
-            # print(target_loss)
             # visual_loss = -1 * args.ssim_weight * \
             #               ssim_loss(source_orig, source+delta)
             # total_loss = target_loss + visual_loss
@@ -108,49 +124,38 @@ def optimization_thread(url_list, device, loss_fkt, logger, args, target_hashes,
 
             optimizer.step()
 
-            # # #todo L1 or L_inf
-            # l1_norm = torch.norm(delta, p=1)
-            # print(l1_norm)
-            # if l1_norm > epsilon:
-            #     delta.data = epsilon * delta.data.sign() / l1_norm
-                # delta.grad.zero_().detach()
+            with torch.no_grad():
+                delta.clamp_(-epsilon, epsilon)
+                # Check for hash changes
+                if i % args.check_interval == 0:
+                    with torch.no_grad():
+                        #todo: Previous save and reload has issues in normalization
+                        current_img = source + delta
+                        check_output = model(normalize(current_img,data))
+                        source_hash_hex = torch.relu(torch.round(check_output)).int()
+                        if l1_loss(source_hash_hex, target_hash) < theshold:
+                            # Compute metrics in the [0, 1] space
+                            l2_distance = torch.norm(
+                                current_img - source_orig, p=2)
+                            linf_distance = torch.norm(
+                                current_img - source_orig, p=float("inf"))
+                            # ssim_distance = ssim_loss(
+                            #     current_img,source_orig)
+                            # ssim_distance = 0.0
+                            print(
+                                f'Finishing after {i + 1} steps - L2 distance: {l2_distance:.4f} - L-Inf distance: {linf_distance:.4f}')
 
-            # delta.data.clamp_(-epsilon, epsilon) #l_inf norm
-            delta.data = (delta + delta.grad.detach().sign()).clamp(-epsilon, epsilon)
-            # with torch.no_grad():
-            #     source.data = torch.clamp(source.data, min=0, max=1)
-
-            # Check for hash changes
-            if i % args.check_interval == 0:
-                with torch.no_grad():
-                    #todo: Previous save and reload has issues in normalization
-                    current_img = source + delta
-                    check_output = model(normalize(current_img))
-                    source_hash_hex = torch.relu(torch.round(check_output)).int()
-                    if l1_loss(source_hash_hex, target_hash) < 1800:
-                        # Compute metrics in the [0, 1] space
-                        l2_distance = torch.norm(
-                            current_img - source_orig, p=2)
-                        linf_distance = torch.norm(
-                            current_img - source_orig, p=float("inf"))
-                        ssim_distance = ssim_loss(
-                            current_img,source_orig)
-                        print(
-                            f'Finishing after {i + 1} steps - L2 distance: {l2_distance:.4f} - L-Inf distance: {linf_distance:.4f} - SSIM: {ssim_distance:.4f}')
-
-                        optimized_file = f'{args.output_folder}/{input_file_name}_opt_{linf_distance:.4f}'
-                        if args.output_folder != '':
-                            save_images(source+delta, args.output_folder,
-                                        f'{input_file_name}_opt_{linf_distance:.4f}')
-                            save_images(delta, args.output_folder,
-                                        f'{input_file_name}_delta')
-
-                        logger_data = [img, optimized_file + '.png', l2_distance.item(),
-                                       linf_distance.item(), ssim_distance.item(), i + 1,
-                                       target_hash_dict[target_hash_hex][1]]
-                        logger.add_line(logger_data)
-                        break
-
+                            optimized_file = f'{args.output_folder}/{input_file_name}_opt_{linf_distance:.4f}'
+                            if args.output_folder != '':
+                                save_images(source+delta, args.output_folder,
+                                            f'{input_file_name}_opt_{linf_distance:.4f}')
+                                save_images(delta, args.output_folder,
+                                            f'{input_file_name}_delta')
+                            logger_data = [img, optimized_file + '.png', l2_distance.item(),
+                                           linf_distance.item(), i + 1,
+                                           target_path]
+                            logger.add_line(logger_data)
+                            break
 
 
 def main():
@@ -159,6 +164,8 @@ def main():
         description='Perform neural collision attack.')
     parser.add_argument('--source', dest='source', type=str,
                         default='inputs/source.png', help='image to manipulate')
+    parser.add_argument('--data', type=str,
+                        default='coco', choices=['coco', 'mnist'])
     parser.add_argument('--model_path', type=str,
                         default='/home/yuchen/code/verified_phash/train_verify/64_ep1_resv5_l1_aug2/ckpt_best.pth', help='path of model weight')
     parser.add_argument('--learning_rate', dest='learning_rate', default=1e-3,
@@ -176,43 +183,20 @@ def main():
     parser.add_argument('--edges_only', dest='edges_only',
                         action='store_true', help='Change only pixels of edges')
     parser.add_argument('--sample_limit', dest='sample_limit',
-                        default=10000000, type=int, help='Maximum of images to be processed')
+                        default=10000, type=int, help='Maximum of images to be processed')
     parser.add_argument('--threads', dest='num_threads',
                         default=1000, type=int, help='Number of parallel threads')
     parser.add_argument('--check_interval', dest='check_interval',
                         default=10, type=int, help='Hash change interval checking')
     parser.add_argument('--epsilon',
-                        default=8./255, type=float)
+                        default=16./255, type=float)
 
     args = parser.parse_args()
 
     model_path = args.model_path
-
     # Load and prepare components
     device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
-    # seed = load_hash_matrix()
-    # seed = torch.tensor(seed).to(device)
 
-    # Read target hashset
-    target_hash_dict = dict()
-    bin_hex_hash_dict = dict()
-    target_hashes = []
-    with open(args.target_hashset, newline='') as csvfile:
-        reader = csv.reader(csvfile, delimiter=',')
-        next(reader, None)  # skip header
-        for row in reader:
-            hash_string = row[2].strip('][').split()
-            hash = [int(b) for b in list(hash_string)]
-            # hash = torch.tensor(hash).unsqueeze(0).to(device)
-            target_hash_dict[row[3]] = [str(hash), row[1]]
-            target_hash = torch.tensor(hash).unsqueeze(0)
-            bin_hex_hash_dict[str(hash)] = row[3]
-            target_hashes.append(target_hash)
-        target_hashes = torch.cat(target_hashes, dim=0).to(device)
-    # print('Target Hash',target_hashes)
-    # print(target_hashes.shape)
-
-    # Prepare output folder
     if args.output_folder != '':
         try:
             os.mkdir(args.output_folder)
@@ -222,18 +206,15 @@ def main():
                     f'Folder {args.output_folder} already exists and is empty.')
             else:
                 print(
-                    f'Folder {args.output_folder} already exists and is not empty.')
+                    f'Folder {args.output_folder} already exists and is not empty, delete it')
+                shutil.rmtree(args.output_folder)
+                os.mkdir(args.output_folder)
 
     # Prepare logging
-    logging_header = ['file', 'optimized_file', 'l2',
-                      'l_inf', 'ssim', 'steps']
+    logging_header = ['file', 'optimized_file', 'l2', 'l_inf','steps']
     logger = Logger(args.experiment_name, logging_header, output_dir=f'{args.output_folder}/logs')
-    logger.add_line(['Hyperparameter', args.source, args.learning_rate,
-                     args.optimizer, args.ssim_weight, args.edges_only])
-
-    # define loss function
-    loss_function = hinge_loss_coco
-    # loss_function = mse_loss_coco
+    # logger.add_line(['Hyperparameter', args.source, args.learning_rate,
+    #                  args.optimizer, args.ssim_weight, args.edges_only])
 
     # Load images
     if os.path.isfile(args.source):
@@ -244,10 +225,11 @@ def main():
         images = sorted(images)
     else:
         raise RuntimeError(f'{args.source} is neither a file nor a directory.')
-    images = images[:args.sample_limit]
-
-    threads_args = (images, device, loss_function,
-                    logger, args, target_hashes, bin_hex_hash_dict, target_hash_dict, model_path, args.epsilon)
+    # images = images[:args.sample_limit]
+    if len(images) > args.sample_limit:
+        images = random.sample(images, args.sample_limit)
+    threads_args = (images, device,
+                    logger, args, model_path, args.epsilon, args.data)
 
     # for t in range(args.num_threads):
     #     optimization_thread(*threads_args)
@@ -257,6 +239,28 @@ def main():
             executor.submit(lambda p: optimization_thread(*p), threads_args)
 
     logger.finish_logging()
+
+    '''
+    Statistic
+    '''
+    data = []
+    columns = ['file', 'optimized_file', 'l2', 'l_inf', 'steps', 'source']
+    with open(f'{args.output_folder}/logs/{args.experiment_name}.csv', 'r') as file:
+        for line in file:
+            line = line.strip()
+            parts = line.split(',')
+            if len(parts) == len(columns):
+                data.append(parts)
+            else:
+                print("Skipped line:", line)
+
+    df = pd.DataFrame(data, columns=columns)
+    print(f'l2: {np.mean([float(i) for i in df.loc[:, "l2"].tolist()])}')
+    print(f'l_inf: {np.mean([float(i) for i in df.loc[:, "l_inf"].tolist()])}')
+    print(f'steps: {np.mean([float(i) for i in df.loc[:, "steps"].tolist()])}')
+    df['l_inf'] = df['l_inf'].astype(float)
+    epsilon = "{:.4f}".format(max(df['l_inf']))
+    print(f"===>Collision Rate under {epsilon}: {(len(df) / args.sample_limit * 100)}%")
 
 
 if __name__ == "__main__":
