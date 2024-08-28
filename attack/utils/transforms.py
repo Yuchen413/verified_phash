@@ -48,6 +48,8 @@ class Rotate:
         self.angle = angle
 
     def __call__(self, x):
+        if self.angle == 0:
+            return x
         return TF.rotate(x, self.angle)
 
 
@@ -79,6 +81,8 @@ class ChangeHue:
         self.hue_angle = hue_angle
 
     def __call__(self, x):
+        if self.hue_angle == 0:
+            return x
         return TF.adjust_hue(x, self.hue_angle / 360)
 
 
@@ -93,6 +97,8 @@ class ChangeBrightness:
         self.brightness_factor = brightness_factor
 
     def __call__(self, x):
+        if self.brightness_factor == 1:
+            return x
         return TF.adjust_brightness(x, self.brightness_factor)
 
 
@@ -107,6 +113,8 @@ class ChangeContrast:
         self.contrast_factor = contrast_factor
 
     def __call__(self, x):
+        if self.contrast_factor == 1:
+            return x
         return TF.adjust_contrast(x, self.contrast_factor)
 
 
@@ -121,6 +129,8 @@ class ChangeSaturation:
         self.saturation_factor = saturation_factor
 
     def __call__(self, x):
+        if self.saturation_factor == 1:
+            return x
         return TF.adjust_saturation(x, self.saturation_factor)
 
 
@@ -134,7 +144,7 @@ class JpegCompression:
         """
         self.compression = compression_value
         self.compression_aug = ImgAugJpegCompression(compression=self.compression, seed=42)
-        self.target = 'nn'
+        self.target = ''
 
         mean = torch.tensor([0.485, 0.456, 0.406])
         std = torch.tensor([0.229, 0.224, 0.225])
@@ -146,6 +156,8 @@ class JpegCompression:
         input_img = (x.permute(1, 2, 0).numpy() * 255).astype('uint8')
         compressed_img = self.compression_aug(image=input_img)
 
+        if self.compression == 0:
+            return x
         return torch.tensor(compressed_img / 255, dtype=torch.float).permute(2, 0, 1)
 
 
@@ -213,5 +225,7 @@ class CenterCrop:
         self.crop_size = crop_size
 
     def __call__(self, x):
+        if self.crop_size == 64:
+            return x
         cropped_region = TF.center_crop(x, output_size=self.crop_size)
         return TF.resize(cropped_region, size=[x.shape[1], x.shape[2]])

@@ -28,12 +28,35 @@ from torchvision import transforms
 import numpy as np
 import pandas as pd
 import torch
-# from models.neuralhash import NeuralHash
 from models.resnet_v5 import resnet_v5
-import base64
-from PIL import Image
 from tqdm import tqdm
-from utils.hashing import compute_hash_coco
+import base64
+# from utils.hashing import compute_hash_coco
+
+class HashPostProcessing:
+    @staticmethod
+    def post_photodna(x):
+        return torch.relu(torch.round(x))
+
+    @staticmethod
+    def post_pdq(x):
+        labels = torch.relu(x) > 0.5
+        return labels.int().float()
+
+    @staticmethod
+    def noop(x):
+        """ No operation function, returns input as-is. """
+        return x
+
+def compute_hash_photodna(y):
+    """Convert the model's ouput to a Base64 encoded string (hash)."""
+    y = torch.relu(torch.round(y))
+    uint8_array = y.cpu().detach().numpy().astype(np.uint8) ##hash bin with int
+    byte_array = uint8_array.tobytes()
+    encoded_str = base64.b64encode(byte_array).decode("utf-8") ##hashes
+    binary_array = np.unpackbits(np.frombuffer(byte_array, dtype=np.uint8))
+    binary_strings = ''.join(str(i) for i in binary_array) ##010101010
+    return uint8_array, binary_strings, encoded_str
 
 def main():
     current_path = os.getcwd()
@@ -45,8 +68,11 @@ def main():
                         default='data/imagenet_test', help='image folder to compute hashes for')
     parser.add_argument('--model', dest='model', type=str,
                         default='/home/yuchen/code/verified_phash/Normal-Training/64-coco-hash-resnetv5-l1.pt', help='image folder to compute hashes for')
-    parser.add_argument('--target', dest='target', type=str,
-                        default='robust', help='image folder to compute hashes for')
+    parser.add_argument('--data', dest='data', type=str,
+                        default='coco', choices=['coco','mnist'])
+    parser.add_argument('--phash', dest='target', type=str,
+                        default='photodna', choices=['photodna','pdq'])
+    #todo Add a dataset, Add a phash (pdq, photodna)
     args = parser.parse_args()
 
     # Load images
@@ -68,10 +94,18 @@ def main():
 
     # Prepare results
     result_df = pd.DataFrame(columns=['image', 'hash_bin', 'hash_hex'])
-    mean = torch.tensor([0.485, 0.456, 0.406])
-    std = torch.tensor([0.229, 0.224, 0.225])
+
+    if args.data == 'coco':
+        mean = torch.tensor([0.485, 0.456, 0.406])
+        std = torch.tensor([0.229, 0.224, 0.225])
+        size = (64,64)
+    elif args.data == 'mnist':
+        mean = torch.tensor([0.])
+        std = torch.tensor([1.])
+        size = (28,28)
+
     transform = transforms.Compose([
-            transforms.Resize((64,64)),
+            transforms.Resize(size),
             transforms.ConvertImageDtype(torch.float32),  # Converts to float and scales to [0, 1]
             transforms.Normalize(mean=mean, std=std)  # Normalizes the image
         ])
@@ -87,16 +121,16 @@ def main():
         # Compute hashes
         model.eval()
         outputs_unmodified = model(img)
-        hash_bin, _, hash_hex = compute_hash_coco(outputs_unmodified)
+        hash_bin, _, hash_hex = compute_hash_photodna(outputs_unmodified)
         result_df = result_df._append(
             {'image': img_name, 'hash_bin': hash_bin, 'hash_hex': hash_hex}, ignore_index=True)
     os.makedirs('./dataset_hashes', exist_ok=True)
+    from_model = os.path.basename(os.path.dirname(args.model))
     if os.path.isfile(args.source):
-        result_df.to_csv(f'./dataset_hashes/{args.source}_hashes_{args.target}.csv')
+        result_df.to_csv(f'./dataset_hashes/{args.source}_hashes_{from_model}.csv')
     elif os.path.isdir(args.source):
         path = pathlib.PurePath(args.source)
-        result_df.to_csv(f'./dataset_hashes/{path.name}_hashes_{args.target}.csv')
-
+        result_df.to_csv(f'./dataset_hashes/{path.name}_hashes_{from_model}.csv')
 
 if __name__ == '__main__':
     main()

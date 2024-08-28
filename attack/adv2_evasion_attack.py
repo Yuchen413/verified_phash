@@ -48,24 +48,7 @@ def optimization_thread(url_list, device, logger, args, model_path, epsilon, dat
     while (url_list != []):
         print(len(url_list))
         img = url_list.pop(0)  # Pop the first image from the original list
-
-        # target_hashes = []
-        # if data == 'mnist':
-        #     # Since the same class in mnist looks very similar, so they should be not considered as collision
-        #     this_round = [x for x in url_list_copy if
-        #                   x.split('/')[-1].split('_')[0] != img.split('/')[-1].split('_')[0]]
-        # else:
-        #     this_round = [x for x in url_list_copy if x != img]
-
-        # for random_img in this_round:
-        #     tensor = load_and_preprocess_img(random_img, device, data)
-        #     with torch.no_grad():
-        #         target_hash = torch.relu(torch.round(model(normalize(tensor,data))))
-        #     target_hashes.append(target_hash.squeeze(0))
-        # target_hashes = torch.stack(target_hashes)
-
         # Store and reload source image to avoid image changes due to different formats
-        #todo load_img Change to per data
         source = load_and_preprocess_img(img, device,data)
         input_file_name = img.rsplit(sep='/', maxsplit=1)[1].split('.')[0]
         if args.output_folder != '':
@@ -75,21 +58,11 @@ def optimization_thread(url_list, device, logger, args, model_path, epsilon, dat
 
         with torch.no_grad():
             outputs_unmodified = model(normalize(source,data))
-            #todo Change to preprocess
             unmodified_hash_bin = torch.relu(torch.round(outputs_unmodified))
             l1_loss = torch.nn.L1Loss(reduction='sum')
             l1_loss_mean = torch.nn.L1Loss(reduction='mean')
             l1_loss_none = torch.nn.L1Loss(reduction='none')
             l2_loss = torch.nn.MSELoss()
-
-            #todo Change to one random select images within the testing dataset
-
-            # loss = l1_loss_none(unmodified_hash_bin,target_hashes).sum(dim=-1)
-            # value, idx = torch.min(loss, dim=0)
-            # target_hash = target_hashes[idx.item()]
-            # target_hash = target_hash.unsqueeze(0)
-            # target_path = this_round[idx.item()]
-            # print('This is the path of preimage:', target_path)
 
             if args.edges_only:
                 # Compute edge mask
@@ -99,6 +72,7 @@ def optimization_thread(url_list, device, logger, args, model_path, epsilon, dat
                 image_gray = image_gray.cpu().numpy()
                 edges = feature.canny(image_gray, sigma=3).astype(int)
                 edge_mask = torch.from_numpy(edges).to(device)
+
 
         #Apply attack
         if args.optimizer == 'Adam':
@@ -112,13 +86,14 @@ def optimization_thread(url_list, device, logger, args, model_path, epsilon, dat
                 f'{args.optimizer} is no valid optimizer class. Please select --optimizer out of [Adam, SGD]')
 
 
-        for i in tqdm(range(2000)):
+        for i in tqdm(range(100)):
             outputs_source = model(normalize(source+delta,data))
-            target_loss = l1_loss_mean(outputs_source, unmodified_hash_bin)
+            target_loss = -l2_loss(outputs_source, unmodified_hash_bin)
             total_loss = target_loss
             # visual_loss = -1 * args.ssim_weight * \
             #               ssim_loss(source_orig, source+delta)
             # total_loss = target_loss + visual_loss
+
             optimizer.zero_grad()
             total_loss.backward()
             if args.edges_only:
@@ -135,6 +110,7 @@ def optimization_thread(url_list, device, logger, args, model_path, epsilon, dat
                         current_img = source + delta
                         check_output = model(normalize(current_img,data))
                         source_hash_hex = torch.relu(torch.round(check_output)).int()
+                        # print(l1_loss(source_hash_hex, unmodified_hash_bin))
                         if l1_loss(source_hash_hex, unmodified_hash_bin) >= theshold:
                             # Compute metrics in the [0, 1] space
                             l2_distance = torch.norm(
@@ -159,6 +135,7 @@ def optimization_thread(url_list, device, logger, args, model_path, epsilon, dat
                             break
 
 
+
 def main():
     # Parse command-line arguments
     parser = argparse.ArgumentParser(
@@ -169,7 +146,7 @@ def main():
                         default='coco', choices=['coco', 'mnist'])
     parser.add_argument('--model_path', type=str,
                         default='/home/yuchen/code/verified_phash/train_verify/64_ep1_resv5_l1_aug2/ckpt_best.pth', help='path of model weight')
-    parser.add_argument('--learning_rate', dest='learning_rate', default=1e-3,
+    parser.add_argument('--learning_rate', dest='learning_rate', default=1e-2,
                         type=float, help='step size of PGD optimization step')
     parser.add_argument('--optimizer', dest='optimizer', default='Adam',
                         type=str, help='kind of optimizer')
@@ -245,12 +222,14 @@ def main():
     Statistic
     '''
     data = []
-    columns = ['file', 'optimized_file', 'l2', 'l_inf', 'steps', 'source']
+    columns = ['file', 'optimized_file', 'l2', 'l_inf', 'steps']
     with open(f'{args.output_folder}/logs/{args.experiment_name}.csv', 'r') as file:
         for line in file:
             line = line.strip()
             parts = line.split(',')
-            if len(parts) == len(columns):
+            if 'file' in parts:
+                print("Skipped line:", line)
+            elif len(parts) == len(columns):
                 data.append(parts)
             else:
                 print("Skipped line:", line)

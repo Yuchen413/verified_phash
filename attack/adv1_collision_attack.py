@@ -110,9 +110,9 @@ def optimization_thread(url_list, device, logger, args, model_path, epsilon, dat
                 f'{args.optimizer} is no valid optimizer class. Please select --optimizer out of [Adam, SGD]')
 
 
-        for i in tqdm(range(2000)):
+        for i in tqdm(range(100)):
             outputs_source = model(normalize(source+delta,data))
-            target_loss = l1_loss_mean(outputs_source, target_hash)
+            target_loss = l2_loss(outputs_source, target_hash)
             total_loss = target_loss
             # visual_loss = -1 * args.ssim_weight * \
             #               ssim_loss(source_orig, source+delta)
@@ -121,11 +121,15 @@ def optimization_thread(url_list, device, logger, args, model_path, epsilon, dat
             total_loss.backward()
             if args.edges_only:
                 optimizer.param_groups[0]['params'][0].grad *= edge_mask
-
             optimizer.step()
 
             with torch.no_grad():
-                delta.clamp_(-epsilon, epsilon)
+                # delta.clamp_(-epsilon, epsilon)
+
+                norm_delta = torch.norm(delta, p=2)  # Calculate the L2 norm of delta
+                if norm_delta > epsilon:
+                    # Scale delta to have an L2 norm of epsilon
+                    delta = delta * (epsilon / norm_delta)
                 # Check for hash changes
                 if i % args.check_interval == 0:
                     with torch.no_grad():
