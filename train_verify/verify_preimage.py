@@ -112,8 +112,8 @@ def get_preimage(model_ori, val_dataloader, eps, dummy_input, threshold=90):
     x_L_list = []
     x_U_list = []
     for i, data in enumerate(tqdm(val_dataloader)):
-        # if i >=2:
-        #     break
+        if i >=NUM_SAMPLE:
+            break
         try:
             x, y = data
             x = x.cuda()
@@ -125,15 +125,11 @@ def get_preimage(model_ori, val_dataloader, eps, dummy_input, threshold=90):
             ptb = PerturbationLpNorm(norm=norm, x_L=lower, x_U=upper, eps=eps)
             bounded_x = BoundedTensor(x, ptb)
 
-            # fixme: We need, |y-y_clean|<=90, that is {y-y_clean <=90 and y_clean-y <=90}
-            #  Two constraints as per inequalities for Hy+d<=0, That is y-(y_clean+90)<=0 and -y+(y_clean-90)<=0
-            #  So I have:
+            # We need, |y-y_clean|<=90, that is {y-y_clean <=90 and y_clean-y <=90}
+            # Two constraints as per inequalities for Hy+d<=0, That is y-(y_clean+90)<=0 and -y+(y_clean-90)<=0
+            # So I have:
             model.constraints = torch.tensor([[[1], [-1]]], dtype=torch.float32)  # this is H
-            # fixme: the below comment out threshold is wrong due to reversal of positive and negative,
-            #  since I didn't notice there is a "d = -model.thresholds" in output_constraints.py
-            # model.thresholds = torch.tensor([-(y_clean + threshold), (y_clean - threshold)],
-            #                                 dtype=torch.float32)
-            #fixme: the correct one should be:
+            #the correct one should be considering "d = -model.thresholds" in output_constraints.py:
             model.thresholds = torch.tensor([(y_clean + threshold), -(y_clean - threshold)],
                                             dtype=torch.float32)  # this is -d
             model.compute_bounds(x=(bounded_x,), method='CROWN-Optimized')
@@ -176,16 +172,17 @@ def get_preimage(model_ori, val_dataloader, eps, dummy_input, threshold=90):
     print(f"Verified collision rate: {(count_collision+cannot_reach_preimage)/total_samples}")
 
 def main():
+    global NUM_SAMPLE
+    NUM_SAMPLE = 100
     opts = get_opts()
     opts.in_dim = 28
     channel = 1
     opts.val_data = '/home/yuchen/code/verified_phash/train_verify/data/mnist/mnist_test.csv'
     # opts.model = '/home/yuchen/code/verified_phash/train_verify/saved_models/mnist_pdq_ep1/ckpt_best.pth'
-    opts.model = '/home/yuchen/code/verified_phash/train_verify/saved_models/mnist_pdq_ep0/last_epoch_state_dict.pth'
+    opts.model = '/home/yuchen/code/verified_phash/train_verify/saved_models/base_adv/mnist-pdq-ep8-pdg.pt'
     val_data = ImageToHashAugmented_PDQ(opts.val_data, opts.data_dir, resize=opts.in_dim, num_augmented=0)
     # model = resnet_v5(num_classes=144, input_dim=opts.in_dim)
     val_dataloader = DataLoader(val_data, batch_size=opts.batch_size, shuffle=True, pin_memory=True)
-    val_dataloader_all = DataLoader(val_data, batch_size=10000, shuffle=True, pin_memory=True)
     model = resnet(in_ch=1, in_dim=opts.in_dim)
     model_weights = torch.load(opts.model)
     model.load_state_dict(model_weights)
