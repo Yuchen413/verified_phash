@@ -81,7 +81,7 @@ def get_C(args, data, labels):
 
 def get_bound_loss(args, model, loss_fusion, eps_scheduler,
                     x=None, data=None, labels = None, eps=None,
-                    meter=None, train=False, threshold = 90):
+                    meter=None, train=False, threshold = 90, margin= 90):
     if loss_fusion:
         c, bound_lower, bound_upper = None, False, True
     else:
@@ -114,7 +114,7 @@ def get_bound_loss(args, model, loss_fusion, eps_scheduler,
             raise NotImplementedError
         return None, torch.mean(torch.log(ub) + get_exp_module(model).max_input)
     else:
-        robust_loss = robust_l1_loss(lb, ub, labels) + 0.1*robust_collision_loss(lb,ub,margin=threshold)
+        robust_loss = robust_l1_loss(lb, ub, labels) + 100*robust_collision_loss(lb,ub,margin=margin)
         # robust_loss = robust_l1_loss(lb, ub, labels)
         return lb, ub, robust_loss
 
@@ -136,12 +136,15 @@ def cert(args, model, model_ori, epoch, epoch_progress, data, labels, eps, data_
     if 'photodna' in args.dir:
         post_process = HashPostProcessing.post_photodna
         threshold = 1800
+        margin = 1800
     elif 'pdq' in args.dir:
         post_process = HashPostProcessing.post_pdq
         threshold = 90
+        margin = 90
     else:
         post_process = HashPostProcessing.noop
-        threshold = 90
+        threshold = 0
+        margin = 0
 
     if loss_fusion:
         x = (x, labels)
@@ -158,10 +161,10 @@ def cert(args, model, model_ori, epoch, epoch_progress, data, labels, eps, data_
     if robust or reg or args.xiao_reg or args.vol_reg:
         lb, ub, robust_loss = get_bound_loss(args, model, loss_fusion, eps_scheduler,
             x=(x if loss_fusion else None), data=data, labels=labels, 
-            eps=eps, meter=meter, train=train, threshold = threshold)
+            eps=eps, meter=meter, train=train, threshold = threshold, margin=margin)
         err_loss = nn.L1Loss(reduction='none')
-        robust_err_lb = torch.sum(err_loss(post_process(lb), labels).sum(1)>=threshold).item()
-        robust_err_ub = torch.sum(err_loss(post_process(ub), labels).sum(1)>=threshold).item()
+        robust_err_lb = torch.sum(err_loss(post_process(lb), labels).sum(1) >= threshold).item()
+        robust_err_ub = torch.sum(err_loss(post_process(ub), labels).sum(1) >= threshold).item()
         robust_err = max(robust_err_ub, robust_err_lb) / data.size(0) if not loss_fusion else None
 
     else:
