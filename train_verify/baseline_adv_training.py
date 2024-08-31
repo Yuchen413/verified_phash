@@ -41,6 +41,25 @@ def pgd_linf(model, x, y, loss_fct, epsilon=8/255, alpha=5e-4, num_iter=20, rand
         delta.grad.zero_()
     return delta.detach()
 
+def norms(Z):
+    """Compute norms over all but the first dimension"""
+    return Z.view(Z.shape[0], -1).norm(dim=1)[:,None,None,None]
+def pgd_l2(model, x, y, loss_fct, epsilon=8/255, alpha=5e-4, num_iter=20, randomize=True):
+    """ Construct  adversarial examples on the examples X"""
+    if randomize:
+        delta = torch.rand_like(x, requires_grad=True)
+    else:
+        delta = torch.zeros_like(x, requires_grad=True)
+    for t in range(num_iter):
+        y_p = model(x + delta)
+        loss = loss_fct(y_p, y)
+        loss.backward()
+        delta.data += alpha * delta.grad.detach() / norms(delta.grad.detach())
+        delta.data = torch.min(torch.max(delta.detach(), -x), 1 - x)  # clip X+delta to [0,1]
+        delta.data *= epsilon / norms(delta.detach()).clamp(min=epsilon)
+        delta.grad.zero_()
+    return delta.detach()
+
 def fgsm(model, x, y, loss_fct, epsilon=8/255):
     """ Construct FGSM adversarial examples on the examples X"""
     delta = torch.zeros_like(x, requires_grad=True)
