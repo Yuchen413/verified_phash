@@ -114,8 +114,7 @@ def get_bound_loss(args, model, loss_fusion, eps_scheduler,
             raise NotImplementedError
         return None, torch.mean(torch.log(ub) + get_exp_module(model).max_input)
     else:
-        robust_loss = robust_l1_loss(lb, ub, labels) + 100*robust_collision_loss(lb,ub,margin=margin)
-        # robust_loss = robust_l1_loss(lb, ub, labels)
+        robust_loss = robust_l1_loss(lb, ub, labels) + 1*robust_collision_loss(lb,ub,margin=margin) #1 is the default weight
         return lb, ub, robust_loss
 
 def cert(args, model, model_ori, epoch, epoch_progress, data, labels, eps, data_max, data_min, std, 

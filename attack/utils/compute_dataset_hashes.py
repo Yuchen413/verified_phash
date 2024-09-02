@@ -67,9 +67,9 @@ def main():
     parser.add_argument('--source', dest='source', type=str,
                         default='data/imagenet_test', help='image folder to compute hashes for')
     parser.add_argument('--model', dest='model', type=str,
-                        default='/home/yuchen/code/verified_phash/Normal-Training/64-coco-hash-resnetv5-l1.pt', help='image folder to compute hashes for')
+                        default='/home/yuchen/code/verified_phash/train_verify/saved_models/nsfw_photodna_ep1/ckpt_best.pth')
     parser.add_argument('--data', dest='data', type=str,
-                        default='coco', choices=['coco','mnist'])
+                        default='coco', choices=['coco','mnist', 'nsfw'])
     parser.add_argument('--phash', dest='target', type=str,
                         default='photodna', choices=['photodna','pdq'])
     #todo Add a dataset, Add a phash (pdq, photodna)
@@ -95,20 +95,21 @@ def main():
     # Prepare results
     result_df = pd.DataFrame(columns=['image', 'hash_bin', 'hash_hex'])
 
-    if args.data == 'coco':
-        mean = torch.tensor([0.485, 0.456, 0.406])
-        std = torch.tensor([0.229, 0.224, 0.225])
-        size = (64,64)
-    elif args.data == 'mnist':
+    if args.data == 'mnist':
         mean = torch.tensor([0.])
         std = torch.tensor([1.])
         size = (28,28)
+    else:
+        mean = torch.tensor([0.485, 0.456, 0.406])
+        std = torch.tensor([0.229, 0.224, 0.225])
+        size = (64,64)
 
     transform = transforms.Compose([
             transforms.Resize(size),
             transforms.ConvertImageDtype(torch.float32),  # Converts to float and scales to [0, 1]
             transforms.Normalize(mean=mean, std=std)  # Normalizes the image
         ])
+
     for img_name in tqdm(images):
         # Preprocess image
         try:

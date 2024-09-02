@@ -30,7 +30,7 @@ import random
 import pandas as pd
 
 
-def optimization_thread(url_list, device, logger, args, model_path, epsilon, data):
+def optimization_thread(url_list, device, logger, args, model_path, epsilon, data, target_hashes=None,  bin_hex_hash_dict=None , target_hash_dict=None):
     print(f'Process {threading.get_ident()} started')
     if data == 'mnist':
         model = resnet(in_ch=1, in_dim=28)
@@ -46,21 +46,26 @@ def optimization_thread(url_list, device, logger, args, model_path, epsilon, dat
 
     # Start optimizing images
     while (url_list != []):
+
         print(len(url_list))
         img = url_list.pop(0)  # Pop the first image from the original list
-        target_hashes = []
-        if data == 'mnist':
-            # Since the same class in mnist looks very similar, so they should be not considered as collision
-            this_round = [x for x in url_list_copy if
-                          x.split('/')[-1].split('_')[0] != img.split('/')[-1].split('_')[0]]
+        if data == 'nsfw':
+            target_hashes = target_hashes
         else:
-            this_round = [x for x in url_list_copy if x != img]
-        for random_img in this_round:
-            tensor = load_and_preprocess_img(random_img, device, data)
-            with torch.no_grad():
-                target_hash = torch.relu(torch.round(model(normalize(tensor,data))))
-            target_hashes.append(target_hash.squeeze(0))
-        target_hashes = torch.stack(target_hashes)
+            target_hashes = []
+            if data == 'mnist':
+                # Since the same class in mnist looks very similar, so they should be not considered as collision
+                this_round = [x for x in url_list_copy if
+                              x.split('/')[-1].split('_')[0] != img.split('/')[-1].split('_')[0]]
+            else:
+                this_round = [x for x in url_list_copy if x != img]
+            for random_img in this_round:
+                tensor = load_and_preprocess_img(random_img, device, data)
+                with torch.no_grad():
+                    target_hash = torch.relu(torch.round(model(normalize(tensor,data))))
+                target_hashes.append(target_hash.squeeze(0))
+            target_hashes = torch.stack(target_hashes)
+
 
         # Store and reload source image to avoid image changes due to different formats
         #todo load_img Change to per data
@@ -73,20 +78,28 @@ def optimization_thread(url_list, device, logger, args, model_path, epsilon, dat
 
         with torch.no_grad():
             outputs_unmodified = model(normalize(source,data))
-            #todo Change to preprocess
             unmodified_hash_bin = torch.relu(torch.round(outputs_unmodified))
             l1_loss = torch.nn.L1Loss(reduction='sum')
             l1_loss_mean = torch.nn.L1Loss(reduction='mean')
             l1_loss_none = torch.nn.L1Loss(reduction='none')
             l2_loss = torch.nn.MSELoss()
 
-            #todo Change to one random select images within the testing dataset
-
             loss = l1_loss_none(unmodified_hash_bin,target_hashes).sum(dim=-1)
-            value, idx = torch.min(loss, dim=0)
-            target_hash = target_hashes[idx.item()]
-            target_hash = target_hash.unsqueeze(0)
-            target_path = this_round[idx.item()]
+
+            if data == 'nsfw':
+                _, idx = torch.min(loss, dim=0)
+                target_hash = target_hashes[idx.item()]
+                target_hash_str = str(target_hash.cpu().tolist())
+                target_hash_hex = bin_hex_hash_dict[target_hash_str]
+                target_hash = target_hash.unsqueeze(0).float()
+
+            else:
+                value, idx = torch.min(loss, dim=0)
+                target_hash = target_hashes[idx.item()]
+                target_hash = target_hash.unsqueeze(0)
+                target_path = this_round[idx.item()]
+
+
             # print('This is the path of preimage:', target_path)
 
             if args.edges_only:
@@ -110,30 +123,31 @@ def optimization_thread(url_list, device, logger, args, model_path, epsilon, dat
                 f'{args.optimizer} is no valid optimizer class. Please select --optimizer out of [Adam, SGD]')
 
 
-        for i in tqdm(range(100)):
+        for i in tqdm(range(1000)):
             outputs_source = model(normalize(source+delta,data))
             target_loss = l2_loss(outputs_source, target_hash)
             total_loss = target_loss
             # visual_loss = -1 * args.ssim_weight * \
             #               ssim_loss(source_orig, source+delta)
             # total_loss = target_loss + visual_loss
+
+
             optimizer.zero_grad()
             total_loss.backward()
             if args.edges_only:
                 optimizer.param_groups[0]['params'][0].grad *= edge_mask
+
             optimizer.step()
 
             with torch.no_grad():
-                # delta.clamp_(-epsilon, epsilon)
-
-                norm_delta = torch.norm(delta, p=2)  # Calculate the L2 norm of delta
-                if norm_delta > epsilon:
-                    # Scale delta to have an L2 norm of epsilon
-                    delta = delta * (epsilon / norm_delta)
+                delta.clamp_(-epsilon, epsilon)
+                # norm_delta = torch.norm(delta, p=2)  # Calculate the L2 norm of delta
+                # if norm_delta > epsilon:
+                #     # Scale delta to have an L2 norm of epsilon
+                #     delta = delta * (epsilon / norm_delta)
                 # Check for hash changes
                 if i % args.check_interval == 0:
                     with torch.no_grad():
-                        #todo: Previous save and reload has issues in normalization
                         current_img = source + delta
                         check_output = model(normalize(current_img,data))
                         source_hash_hex = torch.relu(torch.round(check_output)).int()
@@ -143,9 +157,6 @@ def optimization_thread(url_list, device, logger, args, model_path, epsilon, dat
                                 current_img - source_orig, p=2)
                             linf_distance = torch.norm(
                                 current_img - source_orig, p=float("inf"))
-                            # ssim_distance = ssim_loss(
-                            #     current_img,source_orig)
-                            # ssim_distance = 0.0
                             print(
                                 f'Finishing after {i + 1} steps - L2 distance: {l2_distance:.4f} - L-Inf distance: {linf_distance:.4f}')
 
@@ -155,9 +166,15 @@ def optimization_thread(url_list, device, logger, args, model_path, epsilon, dat
                                             f'{input_file_name}_opt_{linf_distance:.4f}')
                                 save_images(delta, args.output_folder,
                                             f'{input_file_name}_delta')
-                            logger_data = [img, optimized_file + '.png', l2_distance.item(),
-                                           linf_distance.item(), i + 1,
-                                           target_path]
+                            if data == 'nsfw':
+                                logger_data = [img, optimized_file + '.png', l2_distance.item(),
+                                               linf_distance.item(), i + 1,
+                                               target_hash_dict[target_hash_hex][1]]
+                            else:
+                                logger_data = [img, optimized_file + '.png', l2_distance.item(),
+                                               linf_distance.item(), i + 1,
+                                               target_path]
+
                             logger.add_line(logger_data)
                             break
 
@@ -169,7 +186,7 @@ def main():
     parser.add_argument('--source', dest='source', type=str,
                         default='inputs/source.png', help='image to manipulate')
     parser.add_argument('--data', type=str,
-                        default='coco', choices=['coco', 'mnist'])
+                        default='coco', choices=['coco', 'mnist', 'nsfw'])
     parser.add_argument('--model_path', type=str,
                         default='/home/yuchen/code/verified_phash/train_verify/64_ep1_resv5_l1_aug2/ckpt_best.pth', help='path of model weight')
     parser.add_argument('--learning_rate', dest='learning_rate', default=1e-3,
@@ -200,6 +217,25 @@ def main():
     model_path = args.model_path
     # Load and prepare components
     device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+
+    if args.data == 'nsfw':
+        # Read target hashset
+        target_hash_dict = dict()
+        bin_hex_hash_dict = dict()
+        target_hashes = []
+        with open(args.target_hashset, newline='') as csvfile:
+            reader = csv.reader(csvfile, delimiter=',')
+            next(reader, None)  # skip header
+            for row in reader:
+                hash_string = row[2].strip('][').split()
+                hash = [int(b) for b in list(hash_string)]
+                # hash = torch.tensor(hash).unsqueeze(0).to(device)
+                target_hash_dict[row[3]] = [str(hash), row[1]]
+                target_hash = torch.tensor(hash).unsqueeze(0)
+                bin_hex_hash_dict[str(hash)] = row[3]
+                target_hashes.append(target_hash)
+            target_hashes = torch.cat(target_hashes, dim=0).to(device)
+
 
     if args.output_folder != '':
         try:
@@ -232,8 +268,10 @@ def main():
     # images = images[:args.sample_limit]
     if len(images) > args.sample_limit:
         images = random.sample(images, args.sample_limit)
+
     threads_args = (images, device,
-                    logger, args, model_path, args.epsilon, args.data)
+                    logger, args, model_path, args.epsilon, args.data, target_hashes, bin_hex_hash_dict, target_hash_dict)
+
 
     # for t in range(args.num_threads):
     #     optimization_thread(*threads_args)

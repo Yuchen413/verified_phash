@@ -27,7 +27,7 @@ for subdir, dirs, files in os.walk(root):
         hash_vector, quality = pdqhash.compute(image)
 
         # Extract the relative path starting from 'testing/'
-        relative_path = os.path.relpath(file_path, '../Normal-Training')
+        relative_path = os.path.relpath(file_path, '../data')
 
         # Append the path and hash_vector to the data list
         data.append([relative_path, hash_vector])

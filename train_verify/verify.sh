@@ -1,11 +1,5 @@
-#python verify_evasion.py --epsilon=0.0039 --model='64-coco-hash-resnetv5-l1-aug2-new.pt'
-#python verify_evasion.py --epsilon=0.0078 --model='64-coco-hash-resnetv5-l1-aug2-new.pt'
-#python verify_evasion.py --epsilon=0.0156 --model='64-coco-hash-resnetv5-l1-aug2-new.pt'
-#python verify_evasion.py --epsilon=0.0312 --model='64-coco-hash-resnetv5-l1-aug2-new.pt'
-#python verify_evasion.py --epsilon=0.2509 --model='64-coco-hash-resnetv5-l1-aug2-new.pt'
-python verify_evasion.py --epsilon=0.0039 --model='/home/yuchen/code/verified_phash/train_verify/mnist_pdq_ep1_aug2/ckpt_best.pth'
+#python verify_evasion.py --data=coco --epsilon=0.0312 --model='saved_models/base_adv/coco-pdq-ep8-pdg.pt'
+#python verify_evasion.py --data=mnist --epsilon=0.0078 --model='saved_models/base_adv/mnist-pdq-ep8-pdg.pt'
+#python verify_evasion.py --data=nsfw --epsilon=0.0312 --model='saved_models/nsfw_photodna_ep1/ckpt_best.pth'
 
-#python verify_evasion.py --epsilon=0.0039 --model='../train_verify/64_ep1_resv5_l1_aug2_new_collision/ckpt_best.pth'
-#python verify_evasion.py --epsilon=0.0078 --model='../train_verify/64_ep1_resv5_l1_aug2_new_collision/ckpt_best.pth'
-#python verify_evasion.py --epsilon=0.0156 --model='../train_verify/64_ep1_resv5_l1_aug2_new_collision/ckpt_best.pth'
-#python verify_evasion.py --epsilon=0.0312 --model='../train_verify/64_ep1_resv5_l1_aug2_new_collision/ckpt_best.pth'
+

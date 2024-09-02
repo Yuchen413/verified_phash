@@ -7,7 +7,6 @@ import sys
 import glob
 import time
 import base64
-import numpy as np
 import multiprocessing
 from ctypes import cast
 from ctypes import cdll
@@ -57,15 +56,16 @@ def generateHash(outputFolder, libName, imagePath):
 			hashList[i] = int(hashPart).to_bytes((len(hashPart) + 7) // 8, 'big')
 		hashBytes = b''.join(hashList)
 		with open(os.path.join(outputFolder, workerId + '.txt'), 'a', encoding = 'utf8') as outputFile:
-			#outputFile.write('"' + imagePath + '","' + hashString + '"\n') # uncomment if you prefer base10 hashes
+			# outputFile.write('"' + imagePath + '","' + hashString + '"\n') # uncomment if you prefer base10 hashes
 			outputFile.write('"' + imagePath + '","' + base64.b64encode(hashBytes).decode('utf-8') + '"\n')
 	except Exception as e:
 		print(e)
 
 if __name__ == '__main__':
 	# root = '../attack/logs/coco_val_photodna/linf_epsilon'
-	root = '../train_verify/data/mnist/testing'
+	# root = '../train_verify/data/mnist/testing'
 	# root = '../train_verify/data/celeba'
+	root = '../train_verify/data/celeba_random'
 	inputFolders, SavedFolder = check_subfolders(root)
 	outputFolder = os.getcwd()
 	if sys.platform == "windows":
@@ -117,8 +117,10 @@ if __name__ == '__main__':
 			image_path = parts[0]
 			hash_hex = parts[1]
 
+			relative_path = os.path.relpath(image_path, '../train_verify/data')
+
 			# Extract image number from path
-			image_number = int(os.path.splitext(os.path.basename(image_path))[0])
+			# image_number = int(os.path.splitext(os.path.basename(image_path))[0])
 
 			# Decode the base64 hash to bytes, then to integers
 			hash_bytes = base64.b64decode(hash_hex)
@@ -127,8 +129,8 @@ if __name__ == '__main__':
 
 			# Store in list as a dictionary
 			data.append({
-				'image': image_number,
-				'hash_bin': hash_bin,
+				'image': relative_path.replace("\\", "/"),
+				# 'hash_bin': hash_bin,
 				'hash_hex': hash_hex
 			})
 
@@ -139,9 +141,10 @@ if __name__ == '__main__':
 		csv_file_path = os.path.join(SavedFolder, f'{fileName}.csv')
 		with open(csv_file_path, 'w', newline='', encoding='utf-8') as file:
 			writer = csv.writer(file)
-			writer.writerow(['image', 'hash_bin', 'hash_hex'])
+			# writer.writerow(['image', 'hash_bin', 'hash_hex'])
 			for item in data:
-				writer.writerow([item['image'], item['hash_bin'], item['hash_hex']])
+				# writer.writerow([item['image'], item['hash_bin'], item['hash_hex']])
+				writer.writerow([item['image'], item['hash_hex']])
 
 
 		print('Results saved into ' + os.path.join(SavedFolder, f'{fileName}.csv'))

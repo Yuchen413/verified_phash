@@ -55,7 +55,7 @@ def l1_distance_pairwise(tensor1, tensor2, batch_size=200, use_gpu=True):
     return l1_matrix.cpu()
 
 
-def calculate_roc_auc(l1_matrix, RANGE, num_thresholds=100, steepness=0.01, batch_size=200):
+def calculate_roc_auc(l1_matrix, RANGE, num_thresholds=20, steepness=0.01, batch_size=100):
     l1_matrix = torch.tensor(l1_matrix, device='cuda')  # Move the matrix to GPU
     n = l1_matrix.size(0)
     threshold_range = RANGE
@@ -87,9 +87,18 @@ def calculate_roc_auc(l1_matrix, RANGE, num_thresholds=100, steepness=0.01, batc
     # Compute ROC curve and AUC
     fpr, tpr, thresholds = roc_curve(all_labels, all_probabilities)
     roc_auc = auc(fpr, tpr)
-    # print("ROC_AUC:", roc_auc)
 
-    return fpr, tpr, thresholds, roc_auc
+    #calculate fpr an tpr with 0.15
+    predictions = (all_probabilities >= 0.1).astype(int)
+    TP = np.sum((predictions == 1) & (all_labels == 1))
+    FP = np.sum((predictions == 1) & (all_labels == 0))
+    TN = np.sum((predictions == 0) & (all_labels == 0))
+    FN = np.sum((predictions == 0) & (all_labels == 1))
+    TPR = TP / (TP + FN) if (TP + FN) > 0 else 0
+    FPR = FP / (FP + TN) if (FP + TN) > 0 else 0
+
+
+    return FPR, TPR, thresholds, roc_auc
 
 
 def get_hashes_from_csv(file_path):
@@ -161,8 +170,8 @@ def process_transformation(trans_name, values, bin_hashes_orig, args, num_proces
         fpr, tpr, thresholds, roc_auc = calculate_roc_auc(value, args.range)
         keys.append(key)
         auc_values.append(roc_auc)
-        fpr_values.append(np.mean(fpr))
-        tpr_values.append(np.mean(tpr))
+        fpr_values.append(fpr)
+        tpr_values.append(tpr)
 
     save_results(keys, auc_values, fpr_values, tpr_values, args, trans_name)
     return keys, auc_values, fpr_values, tpr_values
@@ -256,6 +265,7 @@ def main():
     args = process_arguments(args)
     TARGET = args.target
     RANGE = args.range
+
 
     bin_hashes_orig = torch.tensor(get_hashes_from_csv(os.path.join(args.hash_dir, f'{args.dataset}_original.csv')))
 

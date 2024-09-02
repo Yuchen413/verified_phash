@@ -148,6 +148,8 @@ def prepare_model(args, logger, config):
         input_shape = (3,360,360)
     elif 'coco' in config['data']:
         input_shape = (3,64,64)
+    elif 'nsfw' in config['data']:
+        input_shape = (3, 64, 64)
     else:
         raise NotImplementedError(config['data'])
 
@@ -160,6 +162,9 @@ def prepare_model(args, logger, config):
         model_ori = eval(model)(onnx_model, **parse_opts(args.model_params))
 
     if 'coco' in config['data']:
+        model_ori = eval(model)(**parse_opts(args.model_params))
+
+    elif 'nsfw' in config['data']:
         model_ori = eval(model)(**parse_opts(args.model_params))
 
     else:

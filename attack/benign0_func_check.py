@@ -46,6 +46,8 @@ def get_dataset(dataset_name: str, additional_transforms=None, target = 'photodn
         dataset = ImageNet(root='data/ILSVRC2012', split='val', transform=img_transform)
     elif dataset_name.lower() == 'coco_val':
         dataset = ImageToHash_Attack('../train_verify/data/coco-val.csv', '../train_verify/data', transform=img_transform)
+    elif dataset_name.lower() == 'nsfw':
+        dataset = ImageToHash_Attack('../train_verify/data/nsfw_val.csv', '../train_verify/data', transform=img_transform)
     else:
         raise RuntimeError(f'Dataset with name {dataset_name} was not found.')
 
@@ -240,7 +242,7 @@ def main():
     parser = argparse.ArgumentParser()
 
     parser.add_argument('--dataset', default='coco_val',
-                        choices=['coco_val'], type=str,
+                        choices=['coco_val', 'nsfw'], type=str,
                         help='The dataset that is used')
     parser.add_argument('--batch_size', default=128, type=int, help='The batch size used for inference')
     parser.add_argument('--max_rot_angle', default=64, type=int,

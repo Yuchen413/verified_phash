@@ -44,7 +44,7 @@ def pgd_linf(model, x, y, loss_fct, epsilon=8/255, alpha=5e-4, num_iter=20, rand
 def norms(Z):
     """Compute norms over all but the first dimension"""
     return Z.view(Z.shape[0], -1).norm(dim=1)[:,None,None,None]
-def pgd_l2(model, x, y, loss_fct, epsilon=8/255, alpha=5e-4, num_iter=20, randomize=True):
+def pgd_l2(model, x, y, loss_fct, epsilon=0.2, alpha=5e-4, num_iter=20, randomize=True):
     """ Construct  adversarial examples on the examples X"""
     if randomize:
         delta = torch.rand_like(x, requires_grad=True)

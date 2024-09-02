@@ -38,8 +38,12 @@ def get_opts():
     parser.add_argument("--batch_size", help="Batch size", type=int, default=1)
     parser.add_argument("--verbose", help="Print intermediate statistics", action="store_true")
     parser.add_argument("--in_dim", default=64, type=int)
-    parser.add_argument('--epsilon',
-                        default=1. / 255, type=float)
+    parser.add_argument('--cut_epsilon',
+                        default=8. / 255, type=float)
+    parser.add_argument('--verify_epsilon',
+                        default=8. / 255, type=float)
+    parser.add_argument('--output_threshold',
+                        default=90, type=int)
     parser.add_argument('--model',
                         default='../train_verify/mnist_pdq_ep1/ckpt_best.pth', type=str)
     return parser.parse_args()
@@ -61,7 +65,7 @@ class SummationLayer(nn.Module):
 
 
 class ModifiedModel(nn.Module):
-    def __init__(self, orig_model, cs, in_dim=32, channel=3):
+    def __init__(self, orig_model,  in_dim=32, channel=3):
         super(ModifiedModel, self).__init__()
 
         self.orig_model = orig_model
@@ -69,60 +73,45 @@ class ModifiedModel(nn.Module):
         self.in_dim = in_dim
         self.channel = channel
 
-        cs = torch.tensor(cs, dtype=torch.float32)
-
-        input_dim = self.channel * self.in_dim * self.in_dim
-        c_count = cs.shape[0]
-
-        self.apply_c = nn.Linear(input_dim, input_dim + c_count, bias=True)
-        self.apply_c.weight.data[:input_dim] = torch.eye(input_dim)
-        self.apply_c.weight.data[input_dim:] = cs
-        self.apply_c.bias.data = torch.zeros((input_dim + c_count))
-
-        self.remove_c = nn.Linear(input_dim + c_count, input_dim, bias=True)
-        self.remove_c.weight.data[:, :input_dim] = torch.eye(input_dim)
-        self.remove_c.weight.data[:, input_dim:] = torch.zeros((input_dim, c_count))
-        self.remove_c.bias.data = torch.zeros((input_dim))
-
     def forward(self, x):
-        x = x.view(-1, self.channel * self.in_dim * self.in_dim)
-        x = self.apply_c(x)
-        x = self.remove_c(x)
-        x = x.reshape(1, self.channel, self.in_dim, self.in_dim)
         x = self.orig_model(x)
         x = torch.relu(x)
         x = self.sum_layer(x)
         return x
 
 
-def get_preimage(model_ori, val_dataloader, eps, dummy_input, threshold=90):
+def get_preimage(model_ori, val_dataloader, cut_eps, dummy_input, threshold=1):
+    preimage_save_path = 'saved_preimages'
     apply_output_constraints_to = ['BoundMatMul', 'BoundInput']
     model = BoundedModule(model_ori, dummy_input, bound_opts={
         "conv_mode": "patches",
         'optimize_bound_args': {
             'apply_output_constraints_to': apply_output_constraints_to,
-            'tighten_input_bounds': True,
-            'best_of_oc_and_no_oc': False,
-            'directly_optimize': ['/0'],
+            'tighten_input_bounds': False,
+            'best_of_oc_and_no_oc': True,
+            'directly_optimize': ['/input.1'],
             'oc_lr': 0.1,
             'share_gammas': False,
             'iteration': 1000,
         }
     })
+
+    x_list = []
     x_L_list = []
     x_U_list = []
+    cls_list =[]
     for i, data in enumerate(tqdm(val_dataloader)):
         if i >=NUM_SAMPLE:
             break
         try:
-            x, y = data
+            x, y, cls = data
             x = x.cuda()
             model.eval()
             y_clean = model(x)
             norm = float("inf")
-            lower = torch.clamp(x - eps, min=0)  # Ensuring lower bounds are not less than 0
-            upper = torch.clamp(x + eps, max=1)  # Ensuring upper bounds do not exceed 1
-            ptb = PerturbationLpNorm(norm=norm, x_L=lower, x_U=upper, eps=eps)
+            lower = torch.clamp(x - cut_eps, min=0)
+            upper = torch.clamp(x + cut_eps, max=1)
+            ptb = PerturbationLpNorm(norm=norm, x_L=lower, x_U=upper, eps=cut_eps)
             bounded_x = BoundedTensor(x, ptb)
 
             # We need, |y-y_clean|<=90, that is {y-y_clean <=90 and y_clean-y <=90}
@@ -133,77 +122,122 @@ def get_preimage(model_ori, val_dataloader, eps, dummy_input, threshold=90):
             model.thresholds = torch.tensor([(y_clean + threshold), -(y_clean - threshold)],
                                             dtype=torch.float32)  # this is -d
             model.compute_bounds(x=(bounded_x,), method='CROWN-Optimized')
-            tightened_ptb = model['/0'].perturbation
-            x_L = tightened_ptb.x_L
-            x_U = tightened_ptb.x_U
-            x_L_list.append(x_L.squeeze(0).detach().cpu())
-            x_U_list.append(x_U.squeeze(0).detach().cpu())
 
-            # print('xL:',x_L)
-            # print('xU:',x_U)
-            # ori_image = x.squeeze().cpu().detach().numpy()
-            # lb_image = tightened_ptb.x_L.squeeze().cpu().detach().numpy()
-            # ub_image = tightened_ptb.x_U.squeeze().cpu().detach().numpy()
-            # combined_image = np.concatenate((ori_image, lb_image, ub_image), axis=1)
-            # plt.imsave('e8_combined_image.png', combined_image, cmap='gray')  # cmap='gray' for grayscale
-            # break
+            x_L = model['/input.1'].lower
+            x_U = model['/input.1'].upper
 
-        except RuntimeError as e:
-            if 'CUDA out of memory' in str(e):
-                print(f"Error: CUDA out of memory.")
-                torch.cuda.empty_cache()
-                continue
+            if float('inf') in x_L or float('inf') in x_U:
+                print('Cannot reach the bounds, infinity')
             else:
-                raise  # Re-raise the exception if it's not a memory error
+                x_L = torch.clamp(x_L, min=0)
+                x_U = torch.clamp(x_U, max=1)
+                x_L_list.append(x_L.squeeze(0).detach().cpu())
+                x_U_list.append(x_U.squeeze(0).detach().cpu())
+                x_list.append(x.squeeze(0).detach().cpu())
+                cls_list.append(cls)
+                ori_image = x.squeeze().cpu().detach().numpy()
+                lb_image = x_L.squeeze().cpu().detach().numpy()
+                ub_image = x_U.squeeze().cpu().detach().numpy()
+                combined_image = np.concatenate((ori_image, lb_image, ub_image), axis=1)
+                img_save_path = f'{preimage_save_path}/images/dy_{threshold}'
+                os.makedirs(img_save_path, exist_ok=True)
+                plt.imsave(os.path.join(img_save_path, f'{i}.png'), combined_image, cmap='gray')  # cmap='gray' for grayscale
 
-    torch.save(torch.stack(x_L_list), 'saved_preimages/ep0_X_L.pt')
-    torch.save(torch.stack(x_U_list), 'saved_preimages/ep0_X_U.pt')
 
-    count_collision = 0
-    total_samples = 10000
-    X_L = torch.load('saved_preimages/ep0_X_L.pt')
-    X_U = torch.load('saved_preimages/ep0_X_U.pt')
-    cannot_reach_preimage = total_samples-len(X_L)
-    for i in range(len(X_L)-1):
-        overlaps_lower = X_L[i] <= X_U[i+1:]  # Compare with all following elements
-        overlaps_upper = X_U[i] >= X_L[i+1:]
-        total_overlap = overlaps_lower.all() & overlaps_upper.all()
-        count_collision += total_overlap.sum().item()
-    print(f"Verified collision rate: {(count_collision+cannot_reach_preimage)/total_samples}")
+        except Exception as e:
+            if 'CUDA out of memory' in str(e):
+                print(f"Error: CUDA out of memory due to the bounds are too loose")
+                torch.cuda.empty_cache()
+            continue
+
+    if len(x_L_list) > 0:
+        os.makedirs(preimage_save_path, exist_ok=True)
+        torch.save(torch.stack(x_list), os.path.join(preimage_save_path, f'X_dy_{threshold}_{cut_eps:.4f}.pt'))
+        torch.save(torch.stack(x_L_list), os.path.join(preimage_save_path, f'XL_dy_{threshold}_{cut_eps:.4f}.pt'))
+        torch.save(torch.stack(x_U_list), os.path.join(preimage_save_path, f'XU_dy_{threshold}_{cut_eps:.4f}.pt'))
+        torch.save(torch.tensor(cls_list), os.path.join(preimage_save_path, f'Classes_dy_{threshold}_{cut_eps:.4f}.pt'))  # Save classes
+        print(f'Preimages saved at {preimage_save_path}')
+        return True
+    else:
+        print(f'No reachable preimages, certified no collision rate: 0%')
+        return False
+
+def verify_preimage(preimage_save_path = 'saved_preimages', threshold = 1, verified_epsilon = 8/255, cut_eps = 64/255):
+    X = torch.load(os.path.join(preimage_save_path, f'X_dy_{threshold}_{cut_eps:.4f}.pt')).cuda()
+    X_L = torch.load(os.path.join(preimage_save_path, f'XL_dy_{threshold}_{cut_eps:.4f}.pt')).cuda()
+    X_U = torch.load(os.path.join(preimage_save_path, f'XU_dy_{threshold}_{cut_eps:.4f}.pt')).cuda()
+    classes = torch.load(os.path.join(preimage_save_path, f'Classes_dy_{threshold}_{cut_eps:.4f}.pt'))
+
+    num_sample = len(X)
+    num_pixel = len(X.flatten())
+
+    #first count the cannot cannot rach bounds
+    cannot_reach_preimage = num_sample - len(X_L)
+    print(f'Cannot reach: {cannot_reach_preimage}')
+
+    overlap_indices = set()  # Use a set to store indices of overlapping pairs for uniqueness
+    for i in range(len(X_L) - 1):
+        for j in range(i + 1, len(X_L)):
+            if classes[i] != classes[j]:
+                overlaps = (X_L[i] <= X_U[j]).all() and (X_U[i] >= X_L[j]).all()
+                if overlaps:
+                    overlap_indices.update([i, j])  # Add both indices to the set if they overlap
+    count_collision_under_cut_eps = len(overlap_indices)  # The number of unique indices involved in overlaps
+    print(f'Count preimage overlap under cut eps {cut_eps:.4f}: {count_collision_under_cut_eps}')
+    mask = torch.ones(len(X), dtype=torch.bool)  # Create a mask of overlapped
+    mask[list(overlap_indices)] = False
+    X = X[mask]
+    X_L = X_L[mask]
+    X_U = X_U[mask]
+
+    X_to_verify_L = torch.clamp(X - verified_epsilon, min = 0).cuda()
+    X_to_verify_U = torch.clamp(X + verified_epsilon, max = 1).cuda()
+
+    XL_within_bounds = ((X_L >= X_to_verify_L) & (X_L <= X_to_verify_U))
+    XU_within_bounds = ((X_U >= X_to_verify_L) & (X_U <= X_to_verify_U))
+    both_within_bounds_pixel = (XL_within_bounds & XU_within_bounds).sum().item()
+
+    count_without_pixel = (len(X.flatten()) - both_within_bounds_pixel)
+    print(f'count potential collision in the non-overlapped preimages: {count_without_pixel}')
+    #this is considered as collision under verified eps, since they are not garuenteed to be not overlap
+
+    print(f"Verified NO Collision Rate: {(num_pixel - (count_without_pixel + cannot_reach_preimage*num_pixel/num_sample + count_collision_under_cut_eps*num_pixel/num_sample)) / num_pixel}")
 
 def main():
     global NUM_SAMPLE
-    NUM_SAMPLE = 100
+    NUM_SAMPLE = 10
     opts = get_opts()
     opts.in_dim = 28
     channel = 1
-    opts.val_data = '/home/yuchen/code/verified_phash/train_verify/data/mnist/mnist_test.csv'
-    # opts.model = '/home/yuchen/code/verified_phash/train_verify/saved_models/mnist_pdq_ep1/ckpt_best.pth'
-    opts.model = '/home/yuchen/code/verified_phash/train_verify/saved_models/base_adv/mnist-pdq-ep8-pdg.pt'
-    val_data = ImageToHashAugmented_PDQ(opts.val_data, opts.data_dir, resize=opts.in_dim, num_augmented=0)
-    # model = resnet_v5(num_classes=144, input_dim=opts.in_dim)
+    opts.val_data = 'data/mnist/mnist_test.csv'
+    # opts.model = 'saved_models/mnist_pdq_ep8/ckpt_best.pth'
+    opts.model = 'saved_models/base_adv/mnist-pdq-ep8-pdg.pt'
+
+    val_data = ImageToHashAugmented_PDQ_with_class(opts.val_data, opts.data_dir, resize=opts.in_dim, num_augmented=0)
     val_dataloader = DataLoader(val_data, batch_size=opts.batch_size, shuffle=True, pin_memory=True)
     model = resnet(in_ch=1, in_dim=opts.in_dim)
     model_weights = torch.load(opts.model)
     model.load_state_dict(model_weights)
 
-    num_cs = 20
-    # TODO: with shape [num_cs, C*W*H]
-    input_size = opts.in_dim * opts.in_dim * channel
-    cs = torch.tensor([
-        [np.cos(2 * np.pi * t / (num_cs * 2)), np.sin(2 * np.pi * t / (num_cs * 2))]
-        for t in range(num_cs)
-    ], dtype=torch.float32)
-    cs_expanded = cs.repeat(1, input_size // 2)  # Repeat each element to fill the dimension
-    if cs_expanded.shape[1] != input_size:
-        cs_expanded = torch.cat((cs_expanded, cs[:, :input_size - cs_expanded.shape[1]]), dim=1)
-
-    modified_model = ModifiedModel(model, cs_expanded, in_dim=opts.in_dim, channel=channel)
+    modified_model = ModifiedModel(model, in_dim=opts.in_dim, channel=channel)
     modified_model.cuda()
     modified_model.eval()
 
-    get_preimage(modified_model, val_dataloader, eps=opts.epsilon,
-                 dummy_input=torch.zeros(1, channel, opts.in_dim, opts.in_dim))
+
+    opts.cut_epsilon = 96/ 255
+    opts.output_threshold = 10
+    opts.verify_epsilon = 96/ 255
+
+
+    preimages = get_preimage(modified_model, val_dataloader, cut_eps=opts.cut_epsilon,
+                 dummy_input=torch.zeros(1, channel, opts.in_dim, opts.in_dim), threshold=opts.output_threshold)
+
+    # preimages = True
+
+    if preimages == True:
+        verify_preimage(threshold=opts.output_threshold, verified_epsilon=opts.verify_epsilon, cut_eps=opts.cut_epsilon)
+
+
 
 
 if __name__ == "__main__":

@@ -28,7 +28,7 @@ def post_pdq(x):
 def get_opts():
     parser = ArgumentParser()
     parser.add_argument(
-        "--data-dir", help="Directory containing train/validation images", type=str, default="."
+        "--data-dir", help="Directory containing train/validation images", type=str, default="data"
     )
     parser.add_argument(
         "--train-data",
@@ -40,16 +40,14 @@ def get_opts():
     parser.add_argument("--val-data", help="Validation data", default='coco-val.csv',type=str, required=False)
     parser.add_argument("--epochs", help="Training epochs", type=int, default=50)
     parser.add_argument("--checkpoint_iter", help="Checkpoint frequency", type=int, default=-1)
-    parser.add_argument("--batch_size", help="Batch size", type=int, default=1)
+    parser.add_argument("--batch_size", help="Batch size must be 1 to avoid cuda OOM", type=int, default=1, choices=[1])
     parser.add_argument("--verbose", help="Print intermediate statistics", action="store_true")
     parser.add_argument("--in_dim", default=64, type=int)
     parser.add_argument('--epsilon',
                         default=1. / 255, type=float)
     parser.add_argument('--model',
                         default='../train_verify/64_ep1_resv5_l1_aug2_new_collision/ckpt_best.pth', type=str)
-    parser.add_argument('--target_hash',
-                        default='../attack/dataset_hashes/dog_10K_hashes.csv',
-                        type=str)
+    parser.add_argument("--data", type = str,  default='mnist', choices=['coco', 'mnist', 'nsfw'])
 
     return parser.parse_args()
 
@@ -80,43 +78,19 @@ def calculate_acc(y_pred = None, y_true=None, hashes_csv = '/home/yuchen/code/ve
     acc = torch.sum(correct_matches).item()/len(y_true)
     return acc
 
-
-def get_target_hash(hash_path = '../attack/dataset_hashes/dog_10K_hashes.csv'):
-    target_hash_dict = dict()
-    bin_hex_hash_dict = dict()
-    target_hashes = []
-    with open(hash_path, newline='') as csvfile:
-        reader = csv.reader(csvfile, delimiter=',')
-        next(reader, None)  # skip header
-        for row in reader:
-            hash_string = row[2].strip('][').split()
-            hash = [int(b) for b in list(hash_string)]
-            # hash = torch.tensor(hash).unsqueeze(0).to(device)
-            target_hash_dict[row[3]] = [str(hash), row[1]]
-            target_hash = torch.tensor(hash).unsqueeze(0)
-            bin_hex_hash_dict[str(hash)] = row[3]
-            target_hashes.append(target_hash)
-        target_hashes = torch.cat(target_hashes, dim=0).cuda()
-    return target_hashes
-
 def get_evasion(model, val_dataloader, eps, dummy_input, threshold=90):
     model.eval()
-    total_eva_loss = 0.0
     evasion = 0
-    collision = 0
     num_samples = 0
     l = nn.L1Loss(reduction='none')
     model = BoundedModule(model, dummy_input, bound_opts={"conv_mode": "patches"})
     model.eval()
-
-    # num_batched = 1
 
     with torch.no_grad():
         for i, data in enumerate(tqdm(val_dataloader)):
             try:
                 x, _= data
                 x = x.cuda()
-
                 norm = np.inf
                 ptb = PerturbationLpNorm(norm=norm, eps=eps)
                 bounded_image = BoundedTensor(x, ptb)
@@ -128,9 +102,10 @@ def get_evasion(model, val_dataloader, eps, dummy_input, threshold=90):
                 loss_eva_ub = l(post_ub, y_clean)
 
                 # Evasion
-                robust_eva_lb = torch.sum(loss_eva_lb.sum(1) >= threshold).item()
-                robust_eva_ub = torch.sum(loss_eva_ub.sum(1) >= threshold).item()
-                evasion += max(robust_eva_ub, robust_eva_lb)
+                evasion += torch.sum((max(loss_eva_lb.sum(1), loss_eva_ub.sum(1)) >= threshold)).item()
+                # robust_eva_lb = torch.sum(loss_eva_lb.sum(1) >= threshold).item()
+                # robust_eva_ub = torch.sum(loss_eva_ub.sum(1) >= threshold).item()
+                # evasion += max(robust_eva_ub, robust_eva_lb)
 
                 num_samples += x.size(0)
 
@@ -153,16 +128,36 @@ def get_evasion(model, val_dataloader, eps, dummy_input, threshold=90):
 
 def main():
     opts = get_opts()
-    opts.val_data = 'mnist/mnist_test.csv'
-    opts.in_dim= 28
-    val_data = ImageToHashAugmented_PDQ(opts.val_data, opts.data_dir, resize=opts.in_dim, num_augmented=0)
-    val_dataloader = DataLoader(val_data, batch_size=opts.batch_size, shuffle=True, pin_memory=True)
-    # model = resnet_v5(num_classes=144, input_dim=opts.in_dim)
-    model = resnet(in_ch=1, in_dim=opts.in_dim)
+
+    if opts.data == 'mnist':
+        opts.val_data = 'data/mnist/mnist_test.csv'
+        resize = 28 ##for resize
+        model = resnet(in_ch=1, in_dim=resize)  # PDQ
+        dummy_input = torch.zeros(1, 1, 28, 28)
+        val_data = ImageToHashAugmented_PDQ(opts.val_data, opts.data_dir, resize, 0) if opts.val_data else None
+        val_dataloader = (
+            DataLoader(val_data, batch_size=opts.batch_size, shuffle=True, pin_memory=True)
+            if val_data
+            else None
+        )
+
+    else:
+        # opts.val_data = 'data/coco-val.csv'
+        opts.val_data = 'data/nsfw_val.csv'
+        resize = 64 ##for resize
+        dummy_input = torch.zeros(1, 3, 64, 64)
+        model = resnet_v5(num_classes=144, bn=True, input_dim=resize)  # PhotoDNA
+        val_data = ImageToHashAugmented(opts.val_data, opts.data_dir, resize, 0) if opts.val_data else None
+        val_dataloader = (
+            DataLoader(val_data, batch_size=opts.batch_size, shuffle=True, pin_memory=True)
+            if val_data
+            else None
+        )
+
+
     model_weights = torch.load(opts.model)
     model.load_state_dict(model_weights)
     model.cuda()
-    dummy_input = torch.zeros(1, 1, opts.in_dim, opts.in_dim)
     get_evasion(model, val_dataloader, eps=opts.epsilon, dummy_input=dummy_input)
 
 
