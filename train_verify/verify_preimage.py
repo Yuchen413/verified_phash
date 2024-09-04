@@ -87,7 +87,7 @@ def get_preimage(model_ori, val_dataloader, cut_eps, dummy_input, threshold=1):
         "conv_mode": "patches",
         'optimize_bound_args': {
             'apply_output_constraints_to': apply_output_constraints_to,
-            'tighten_input_bounds': False,
+            'tighten_input_bounds': True,
             'best_of_oc_and_no_oc': True,
             'directly_optimize': ['/input.1'],
             'oc_lr': 0.1,
@@ -123,8 +123,10 @@ def get_preimage(model_ori, val_dataloader, cut_eps, dummy_input, threshold=1):
                                             dtype=torch.float32)  # this is -d
             model.compute_bounds(x=(bounded_x,), method='CROWN-Optimized')
 
-            x_L = model['/input.1'].lower
-            x_U = model['/input.1'].upper
+            tightened_ptb = model['/input.1'].perturbation
+            x_L = tightened_ptb.x_L
+            x_U = tightened_ptb.x_U
+
 
             if float('inf') in x_L or float('inf') in x_U:
                 print('Cannot reach the bounds, infinity')
@@ -169,7 +171,6 @@ def verify_preimage(preimage_save_path = 'saved_preimages', threshold = 1, verif
     classes = torch.load(os.path.join(preimage_save_path, f'Classes_dy_{threshold}_{cut_eps:.4f}.pt'))
 
     num_sample = len(X)
-    num_pixel = len(X.flatten())
 
     #first count the cannot cannot rach bounds
     cannot_reach_preimage = num_sample - len(X_L)
@@ -184,24 +185,7 @@ def verify_preimage(preimage_save_path = 'saved_preimages', threshold = 1, verif
                     overlap_indices.update([i, j])  # Add both indices to the set if they overlap
     count_collision_under_cut_eps = len(overlap_indices)  # The number of unique indices involved in overlaps
     print(f'Count preimage overlap under cut eps {cut_eps:.4f}: {count_collision_under_cut_eps}')
-    mask = torch.ones(len(X), dtype=torch.bool)  # Create a mask of overlapped
-    mask[list(overlap_indices)] = False
-    X = X[mask]
-    X_L = X_L[mask]
-    X_U = X_U[mask]
-
-    X_to_verify_L = torch.clamp(X - verified_epsilon, min = 0).cuda()
-    X_to_verify_U = torch.clamp(X + verified_epsilon, max = 1).cuda()
-
-    XL_within_bounds = ((X_L >= X_to_verify_L) & (X_L <= X_to_verify_U))
-    XU_within_bounds = ((X_U >= X_to_verify_L) & (X_U <= X_to_verify_U))
-    both_within_bounds_pixel = (XL_within_bounds & XU_within_bounds).sum().item()
-
-    count_without_pixel = (len(X.flatten()) - both_within_bounds_pixel)
-    print(f'count potential collision in the non-overlapped preimages: {count_without_pixel}')
-    #this is considered as collision under verified eps, since they are not garuenteed to be not overlap
-
-    print(f"Verified NO Collision Rate: {(num_pixel - (count_without_pixel + cannot_reach_preimage*num_pixel/num_sample + count_collision_under_cut_eps*num_pixel/num_sample)) / num_pixel}")
+    print(f"Verified NO Collision Rate: {(num_sample - cannot_reach_preimage - count_collision_under_cut_eps) / num_sample}")
 
 def main():
     global NUM_SAMPLE
@@ -225,7 +209,7 @@ def main():
 
 
     opts.cut_epsilon = 96/ 255
-    opts.output_threshold = 10
+    opts.output_threshold = 90
     opts.verify_epsilon = 96/ 255
 
 
